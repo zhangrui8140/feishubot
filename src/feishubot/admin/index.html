@@ -1,0 +1,1171 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FeishuBot 连接控制台</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --canvas: #edf1f7;
+      --panel: #fbfcfe;
+      --panel-strong: #ffffff;
+      --ink: #172033;
+      --muted: #687287;
+      --line: #dce2ec;
+      --line-strong: #c7d0de;
+      --blue: #2f6bff;
+      --blue-soft: #e8efff;
+      --purple: #6957e8;
+      --purple-soft: #efedff;
+      --green: #188466;
+      --green-soft: #e5f5ef;
+      --amber: #a15c00;
+      --amber-soft: #fff2d9;
+      --red: #b43a48;
+      --red-soft: #ffeaed;
+      --shadow: 0 18px 50px rgba(40, 55, 83, 0.09);
+      font-family: "Segoe UI Variable", "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      background:
+        linear-gradient(90deg, rgba(47, 107, 255, 0.035) 1px, transparent 1px) 0 0 / 48px 48px,
+        var(--canvas);
+      color: var(--ink);
+    }
+
+    button, input, select { font: inherit; }
+
+    button, input, select, .secret-control { border-radius: 8px; }
+
+    .shell {
+      width: min(1160px, calc(100% - 32px));
+      margin: 28px auto 48px;
+    }
+
+    .masthead {
+      overflow: hidden;
+      position: relative;
+      padding: 28px 30px 26px;
+      border: 1px solid rgba(199, 208, 222, 0.85);
+      border-radius: 16px;
+      background: var(--panel-strong);
+      box-shadow: var(--shadow);
+    }
+
+    .masthead::before {
+      content: "";
+      position: absolute;
+      inset: 0 0 auto;
+      height: 3px;
+      background: linear-gradient(90deg, var(--blue), var(--purple));
+    }
+
+    .title-row {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 24px;
+    }
+
+    .eyebrow {
+      margin: 0 0 7px;
+      color: var(--blue);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(24px, 3vw, 34px);
+      font-weight: 680;
+      letter-spacing: -0.035em;
+    }
+
+    .intro {
+      max-width: 620px;
+      margin: 8px 0 0;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.65;
+    }
+
+    .version {
+      flex: 0 0 auto;
+      padding: 6px 9px;
+      border: 1px solid var(--line);
+      background: #f6f8fb;
+      color: var(--muted);
+      font: 12px/1.2 "Cascadia Mono", Consolas, monospace;
+    }
+
+    .connection-chain {
+      display: grid;
+      grid-template-columns: 1fr 50px 1fr 50px 1fr;
+      align-items: center;
+      margin-top: 28px;
+    }
+
+    .chain-node {
+      min-width: 0;
+      padding: 14px 16px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #f7f9fc;
+    }
+
+    .chain-node.connected {
+      border-color: #add9ca;
+      background: var(--green-soft);
+    }
+
+    .chain-label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+      font-weight: 650;
+    }
+
+    .signal {
+      width: 8px;
+      height: 8px;
+      flex: 0 0 auto;
+      border: 2px solid var(--line-strong);
+      border-radius: 50%;
+      background: var(--panel-strong);
+    }
+
+    .connected .signal {
+      border-color: var(--green);
+      background: var(--green);
+      box-shadow: 0 0 0 4px rgba(24, 132, 102, 0.12);
+    }
+
+    .chain-detail {
+      overflow: hidden;
+      margin-top: 5px;
+      color: var(--muted);
+      font: 12px/1.35 "Cascadia Mono", Consolas, monospace;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .chain-link {
+      height: 1px;
+      background: var(--line-strong);
+      position: relative;
+    }
+
+    .chain-link::after {
+      content: "";
+      position: absolute;
+      top: -3px;
+      right: -1px;
+      width: 6px;
+      height: 6px;
+      border-top: 1px solid var(--line-strong);
+      border-right: 1px solid var(--line-strong);
+      transform: rotate(45deg);
+    }
+
+    .status-strip {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 16px;
+      align-items: center;
+      margin-top: 18px;
+      padding-top: 16px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .config-path {
+      overflow: hidden;
+      font-family: "Cascadia Mono", Consolas, monospace;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .restart-note {
+      color: var(--amber);
+      font-weight: 650;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 18px;
+      margin-top: 18px;
+    }
+
+    .card {
+      padding: 23px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--panel);
+      box-shadow: 0 8px 24px rgba(40, 55, 83, 0.045);
+    }
+
+    .card-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 20px;
+    }
+
+    h2 {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 680;
+      letter-spacing: -0.015em;
+    }
+
+    .section-note {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .field-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .field { min-width: 0; }
+    .field.wide { grid-column: 1 / -1; }
+
+    label, .field-label {
+      display: block;
+      margin-bottom: 7px;
+      color: #4c566b;
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    input, select, .readonly-value {
+      width: 100%;
+      min-height: 40px;
+      border: 1px solid var(--line-strong);
+      background: var(--panel-strong);
+      color: var(--ink);
+      font-family: "Cascadia Mono", Consolas, monospace;
+      font-size: 13px;
+    }
+
+    input, select { padding: 8px 10px; }
+
+    input:hover, select:hover { border-color: #aeb9ca; }
+
+    input:focus-visible, select:focus-visible, button:focus-visible {
+      outline: 3px solid rgba(47, 107, 255, 0.2);
+      outline-offset: 2px;
+      border-color: var(--blue);
+    }
+
+    input:disabled {
+      background: #f2f4f8;
+      color: #929bad;
+      cursor: not-allowed;
+    }
+
+    .readonly-value {
+      display: flex;
+      align-items: center;
+      padding: 8px 10px;
+      background: #f2f4f8;
+      color: var(--muted);
+    }
+
+    .hint {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+
+    .secret-list {
+      display: grid;
+      gap: 11px;
+    }
+
+    .secret-control {
+      display: grid;
+      grid-template-columns: minmax(160px, 1fr) 108px minmax(130px, 1fr);
+      gap: 10px;
+      align-items: center;
+      padding: 11px;
+      border: 1px solid var(--line);
+      background: var(--panel-strong);
+    }
+
+    .secret-name {
+      min-width: 0;
+      font: 12px/1.35 "Cascadia Mono", Consolas, monospace;
+      overflow-wrap: anywhere;
+    }
+
+    .secret-meta {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 5px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .secret-state {
+      display: inline-flex;
+      align-items: center;
+      min-height: 20px;
+      padding: 2px 7px;
+      border-radius: 999px;
+      background: #eef1f5;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 700;
+    }
+
+    .secret-state.configured {
+      background: var(--green-soft);
+      color: var(--green);
+    }
+
+    .secret-control select, .secret-control input { min-height: 36px; }
+
+    .actions {
+      position: sticky;
+      bottom: 16px;
+      z-index: 5;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 18px;
+      padding: 14px;
+      border: 1px solid rgba(199, 208, 222, 0.95);
+      border-radius: 12px;
+      background: rgba(251, 252, 254, 0.94);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(12px);
+    }
+
+    button {
+      min-height: 40px;
+      padding: 9px 15px;
+      border: 1px solid var(--line-strong);
+      background: var(--panel-strong);
+      color: var(--ink);
+      cursor: pointer;
+      font-weight: 650;
+    }
+
+    button:hover { border-color: #aeb9ca; background: #f6f8fb; }
+
+    .primary {
+      border-color: var(--blue);
+      background: var(--blue);
+      color: white;
+    }
+
+    .primary:hover { border-color: #245be0; background: #245be0; }
+    button:disabled { cursor: wait; opacity: 0.62; }
+
+    .feedback {
+      min-width: 0;
+      margin-left: auto;
+      color: var(--muted);
+      font-size: 12px;
+      text-align: right;
+    }
+
+    .feedback.success { color: var(--green); }
+    .feedback.error { color: var(--red); }
+
+    .card-span { grid-column: 1 / -1; }
+
+    textarea {
+      width: 100%;
+      min-height: 76px;
+      border: 1px solid var(--line-strong);
+      background: var(--panel-strong);
+      color: var(--ink);
+      font-family: "Cascadia Mono", Consolas, monospace;
+      font-size: 13px;
+      padding: 8px 10px;
+      resize: vertical;
+    }
+
+    textarea:focus-visible {
+      outline: 3px solid rgba(47, 107, 255, 0.2);
+      outline-offset: 2px;
+      border-color: var(--blue);
+    }
+
+    textarea:disabled, input[type="checkbox"]:disabled {
+      background: #f2f4f8;
+      color: #929bad;
+      cursor: not-allowed;
+    }
+
+    .server-block {
+      margin-bottom: 14px;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel-strong);
+    }
+
+    .server-block:last-of-type { margin-bottom: 0; }
+
+    .server-block-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    .server-block h3 {
+      margin: 0;
+      font-size: 13px;
+      font-weight: 680;
+    }
+
+    .toggle-row {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      margin: 0;
+      color: #4c566b;
+      font-size: 12px;
+      font-weight: 650;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+
+    .toggle-row input { width: auto; min-height: 0; }
+
+    .warning-note {
+      margin-bottom: 14px;
+      padding: 10px 12px;
+      border: 1px solid var(--amber);
+      border-radius: 8px;
+      color: var(--amber);
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .inline-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 16px;
+    }
+
+    .inline-actions .feedback { margin-left: auto; }
+
+    .loading {
+      display: grid;
+      min-height: 180px;
+      place-items: center;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .is-hidden { display: none !important; }
+
+    @media (max-width: 820px) {
+      .shell { width: min(100% - 20px, 680px); margin-top: 10px; }
+      .masthead, .card { padding: 20px; }
+      .layout { grid-template-columns: 1fr; }
+      .connection-chain { grid-template-columns: 1fr; gap: 8px; }
+      .chain-link { width: 1px; height: 14px; margin-left: 22px; }
+      .chain-link::after { top: auto; right: -3px; bottom: 0; transform: rotate(135deg); }
+      .status-strip { grid-template-columns: 1fr; }
+      .restart-note { text-align: left; }
+    }
+
+    @media (max-width: 560px) {
+      .title-row { display: block; }
+      .version { display: inline-block; margin-top: 14px; }
+      .field-grid { grid-template-columns: 1fr; }
+      .field.wide { grid-column: auto; }
+      .secret-control { grid-template-columns: 1fr; }
+      .actions { align-items: stretch; flex-wrap: wrap; bottom: 8px; }
+      .actions button { flex: 1 1 130px; }
+      .feedback { flex: 1 0 100%; margin: 2px 0 0; text-align: left; }
+    }
+
+    @media (prefers-reduced-motion: no-preference) {
+      .masthead, .card { animation: enter 320ms ease-out both; }
+      .card:nth-child(2) { animation-delay: 45ms; }
+      .card:nth-child(3) { animation-delay: 90ms; }
+      .card:nth-child(4) { animation-delay: 135ms; }
+      @keyframes enter {
+        from { opacity: 0; transform: translateY(7px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="masthead">
+      <div class="title-row">
+        <div>
+          <p class="eyebrow">Local connection console</p>
+          <h1>FeishuBot 配置</h1>
+          <p class="intro">维护飞书与 Qoder SDK 的本地连接参数。敏感值只显示配置状态，不会从服务端回传。</p>
+        </div>
+        <span class="version" id="version">v—</span>
+      </div>
+
+      <div class="connection-chain" aria-label="连接状态">
+        <div class="chain-node" id="node-feishu">
+          <div class="chain-label"><span class="signal"></span>飞书</div>
+          <div class="chain-detail" id="detail-feishu">正在检查</div>
+        </div>
+        <div class="chain-link" aria-hidden="true"></div>
+        <div class="chain-node" id="node-qoder">
+          <div class="chain-label"><span class="signal"></span>Qoder SDK</div>
+          <div class="chain-detail" id="detail-qoder">正在检查</div>
+        </div>
+        <div class="chain-link" aria-hidden="true"></div>
+        <div class="chain-node" id="node-workspace">
+          <div class="chain-label"><span class="signal"></span>本地工作区</div>
+          <div class="chain-detail" id="detail-workspace">正在检查</div>
+        </div>
+      </div>
+
+      <div class="status-strip">
+        <span class="config-path" id="config-path">配置文件：正在读取</span>
+        <span class="restart-note">保存后需重启 gateway 与 events</span>
+      </div>
+    </header>
+
+    <div class="loading" id="loading" role="status">正在加载本地配置…</div>
+
+    <form id="config-form" class="is-hidden" novalidate>
+      <div class="layout">
+        <section class="card">
+          <div class="card-head">
+            <h2>基础设置</h2>
+            <span class="section-note">运行方式</span>
+          </div>
+          <div class="field-grid">
+            <div class="field">
+              <label for="LOG_LEVEL">日志级别</label>
+              <select id="LOG_LEVEL" name="LOG_LEVEL">
+                <option>DEBUG</option>
+                <option>INFO</option>
+                <option>WARNING</option>
+                <option>ERROR</option>
+                <option>CRITICAL</option>
+              </select>
+            </div>
+            <div class="field">
+              <span class="field-label">Agent backend</span>
+              <div class="readonly-value" id="backend">qoder_sdk</div>
+              <p class="hint">此页面固定维护 Qoder SDK 链路。</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="card-head">
+            <h2>飞书设置</h2>
+            <span class="section-note">机器人身份</span>
+          </div>
+          <div class="field-grid">
+            <div class="field wide">
+              <label for="FEISHU_APP_ID">App ID</label>
+              <input id="FEISHU_APP_ID" name="FEISHU_APP_ID" autocomplete="off" spellcheck="false">
+            </div>
+            <div class="field wide">
+              <div class="secret-list" id="feishu-secrets"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="card-head">
+            <h2>Qoder 设置</h2>
+            <span class="section-note">分析运行时</span>
+          </div>
+          <div class="field-grid">
+            <div class="field">
+              <label for="QODER_MODEL">模型</label>
+              <input id="QODER_MODEL" name="QODER_MODEL" autocomplete="off" spellcheck="false">
+            </div>
+            <div class="field">
+              <label for="QODER_WORKSPACE_ROOT">工作区</label>
+              <input id="QODER_WORKSPACE_ROOT" name="QODER_WORKSPACE_ROOT" autocomplete="off" spellcheck="false">
+            </div>
+            <div class="field wide">
+              <div class="secret-list" id="qoder-secrets"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="card-head">
+            <h2>性能设置</h2>
+            <span class="section-note">秒 / 会话数</span>
+          </div>
+          <div class="field-grid">
+            <div class="field">
+              <label for="QODER_RUN_TIMEOUT_SECONDS">任务超时</label>
+              <input id="QODER_RUN_TIMEOUT_SECONDS" name="QODER_RUN_TIMEOUT_SECONDS" type="number" min="1" max="3600" step="1">
+            </div>
+            <div class="field">
+              <label for="QODER_CANCEL_GRACE_SECONDS">取消宽限期</label>
+              <input id="QODER_CANCEL_GRACE_SECONDS" name="QODER_CANCEL_GRACE_SECONDS" type="number" min="0" max="300" step="0.1">
+            </div>
+            <div class="field">
+              <label for="QODER_SHUTDOWN_GRACE_SECONDS">关闭宽限期</label>
+              <input id="QODER_SHUTDOWN_GRACE_SECONDS" name="QODER_SHUTDOWN_GRACE_SECONDS" type="number" min="0" max="600" step="0.1">
+            </div>
+            <div class="field">
+              <label for="QODER_MAX_CONCURRENT_RUNS">最大并发</label>
+              <input id="QODER_MAX_CONCURRENT_RUNS" name="QODER_MAX_CONCURRENT_RUNS" type="number" min="1" max="64" step="1">
+            </div>
+            <div class="field">
+              <label for="QODER_MAX_LIVE_SESSIONS">常驻会话数</label>
+              <input id="QODER_MAX_LIVE_SESSIONS" name="QODER_MAX_LIVE_SESSIONS" type="number" min="1" max="256" step="1">
+            </div>
+            <div class="field">
+              <label for="QODER_MAX_QUEUED_PER_SESSION">单会话队列</label>
+              <input id="QODER_MAX_QUEUED_PER_SESSION" name="QODER_MAX_QUEUED_PER_SESSION" type="number" min="0" max="100" step="1">
+            </div>
+            <div class="field">
+              <label for="QODER_SESSION_IDLE_TTL_SECONDS">空闲 TTL</label>
+              <input id="QODER_SESSION_IDLE_TTL_SECONDS" name="QODER_SESSION_IDLE_TTL_SECONDS" type="number" min="60" max="604800" step="1">
+            </div>
+            <div class="field">
+              <label for="QODER_DEDUP_TTL_SECONDS">去重 TTL</label>
+              <input id="QODER_DEDUP_TTL_SECONDS" name="QODER_DEDUP_TTL_SECONDS" type="number" min="60" max="604800" step="1">
+            </div>
+            <div class="field wide">
+              <label for="QODER_SESSION_STORE_DIR">Session 目录</label>
+              <input id="QODER_SESSION_STORE_DIR" name="QODER_SESSION_STORE_DIR" autocomplete="off" spellcheck="false">
+            </div>
+          </div>
+        </section>
+
+        <section class="card card-span" id="mcp-section">
+          <div class="card-head">
+            <h2>MCP 服务器</h2>
+            <span class="section-note" id="mcp-config-path">正在读取 mcp.json 路径</span>
+          </div>
+          <div class="warning-note is-hidden" id="mcp-parse-error" role="alert"></div>
+
+          <div class="server-block">
+            <div class="server-block-head">
+              <div>
+                <h3>数据库 (DMS)</h3>
+                <p class="hint">阿里云 DMS 只读查询（ERP 数据），Agent 必备，不可禁用。</p>
+              </div>
+            </div>
+            <div class="field-grid">
+              <div class="field wide">
+                <label for="MCP_DMS_URL">URL</label>
+                <input id="MCP_DMS_URL" autocomplete="off" spellcheck="false">
+              </div>
+              <div class="field wide">
+                <div class="secret-list" id="mcp-dms-secrets"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="server-block">
+            <div class="server-block-head">
+              <div>
+                <h3>Observability</h3>
+                <p class="hint">日志 / 指标 / 链路只读查询；token 由 CLI 自动续期，失效时点「授权」重新登录。</p>
+              </div>
+              <label class="toggle-row"><input type="checkbox" id="MCP_OBS_ENABLED"> 启用</label>
+            </div>
+            <div class="field-grid">
+              <div class="field wide">
+                <label for="MCP_OBS_URL">URL</label>
+                <input id="MCP_OBS_URL" autocomplete="off" spellcheck="false">
+              </div>
+              <div class="field wide">
+                <div class="inline-actions">
+                  <button type="button" id="mcp-obs-authorize-button">授权</button>
+                  <span class="feedback" id="mcp-obs-auth-status" role="status" aria-live="polite">正在读取授权状态…</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="inline-actions">
+            <button class="primary" type="button" id="mcp-save-button">保存 MCP 配置</button>
+            <div class="feedback" id="mcp-feedback" role="status" aria-live="polite">尚未保存更改</div>
+          </div>
+          <p class="hint">
+            保存后对新会话立即生效，无需重启。每次保存前自动备份到同目录 mcp.json.bak-admin；
+            密码与 Token 只显示配置状态，不会从服务端回传。
+          </p>
+        </section>
+      </div>
+
+      <div class="actions">
+        <button class="primary" type="submit" id="save-button">保存配置</button>
+        <button type="button" id="discard-button">放弃更改</button>
+        <div class="feedback" id="feedback" role="status" aria-live="polite">尚未保存更改</div>
+      </div>
+    </form>
+  </main>
+
+  <script>
+    const editableKeys = [
+      "LOG_LEVEL",
+      "FEISHU_APP_ID",
+      "QODER_MODEL",
+      "QODER_WORKSPACE_ROOT",
+      "QODER_SESSION_STORE_DIR",
+      "QODER_RUN_TIMEOUT_SECONDS",
+      "QODER_CANCEL_GRACE_SECONDS",
+      "QODER_SHUTDOWN_GRACE_SECONDS",
+      "QODER_MAX_CONCURRENT_RUNS",
+      "QODER_MAX_LIVE_SESSIONS",
+      "QODER_MAX_QUEUED_PER_SESSION",
+      "QODER_SESSION_IDLE_TTL_SECONDS",
+      "QODER_DEDUP_TTL_SECONDS"
+    ];
+
+    const secrets = [
+      { key: "FEISHU_APP_SECRET", label: "App Secret", group: "feishu-secrets" },
+      { key: "FEISHU_VERIFICATION_TOKEN", label: "Verification Token", group: "feishu-secrets" },
+      { key: "FEISHU_ENCRYPT_KEY", label: "Encrypt Key", group: "feishu-secrets" },
+      { key: "QODER_PERSONAL_ACCESS_TOKEN", label: "Personal Access Token", group: "qoder-secrets" }
+    ];
+
+    const mcpSecrets = [
+      { key: "MCP_DMS_TOKEN", label: "DMS Token", server: "aliyun-dms-mcp-server", flag: "token_configured", group: "mcp-dms-secrets" }
+    ];
+
+    const form = document.getElementById("config-form");
+    const loading = document.getElementById("loading");
+    const feedback = document.getElementById("feedback");
+    const saveButton = document.getElementById("save-button");
+    let configState = null;
+
+    function setFeedback(message, tone = "") {
+      feedback.textContent = message;
+      feedback.className = `feedback ${tone}`.trim();
+    }
+
+    function setConnection(name, connected, detail) {
+      document.getElementById(`node-${name}`).classList.toggle("connected", connected);
+      document.getElementById(`detail-${name}`).textContent = detail;
+    }
+
+    function createSecretRow(key, label, onDirty) {
+      const row = document.createElement("div");
+      row.className = "secret-control";
+      row.dataset.secret = key;
+
+      const identity = document.createElement("div");
+      const name = document.createElement("div");
+      name.className = "secret-name";
+      name.textContent = label;
+      const meta = document.createElement("div");
+      meta.className = "secret-meta";
+      const state = document.createElement("span");
+      state.className = "secret-state";
+      state.dataset.role = "state";
+      meta.appendChild(state);
+      const note = document.createElement("span");
+      note.textContent = "原值不回显";
+      meta.appendChild(note);
+      identity.append(name, meta);
+
+      const select = document.createElement("select");
+      select.setAttribute("aria-label", `${label} 操作`);
+      select.dataset.role = "action";
+      [
+        ["keep", "保持"],
+        ["replace", "替换"],
+        ["clear", "清除"]
+      ].forEach(([value, text]) => {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = text;
+        select.appendChild(option);
+      });
+
+      const input = document.createElement("input");
+      input.type = "password";
+      input.autocomplete = "new-password";
+      input.placeholder = "输入新值";
+      input.disabled = true;
+      input.dataset.role = "value";
+      input.setAttribute("aria-label", `${label} 新值`);
+
+      select.addEventListener("change", () => {
+        input.disabled = select.value !== "replace";
+        if (input.disabled) input.value = "";
+        if (!input.disabled) input.focus();
+        onDirty();
+      });
+      input.addEventListener("input", onDirty);
+      row.append(identity, select, input);
+      return row;
+    }
+
+    function renderSecretControls() {
+      secrets.forEach((secret) => {
+        document
+          .getElementById(secret.group)
+          .appendChild(createSecretRow(secret.key, secret.label, () => setFeedback("有尚未保存的更改")));
+      });
+    }
+
+    function renderMcpSecretControls() {
+      mcpSecrets.forEach((secret) => {
+        document
+          .getElementById(secret.group)
+          .appendChild(createSecretRow(secret.key, secret.label, () => setMcpFeedback("有尚未保存的更改")));
+      });
+    }
+
+    function applyConfig(config) {
+      editableKeys.forEach((key) => {
+        const field = document.getElementById(key);
+        field.value = config.values[key] ?? "";
+      });
+      secrets.forEach((secret) => {
+        const row = document.querySelector(`[data-secret="${secret.key}"]`);
+        const configured = Boolean(config.secrets[secret.key]?.configured);
+        const state = row.querySelector('[data-role="state"]');
+        const action = row.querySelector('[data-role="action"]');
+        const value = row.querySelector('[data-role="value"]');
+        state.textContent = configured ? "已配置" : "未配置";
+        state.classList.toggle("configured", configured);
+        action.value = "keep";
+        value.value = "";
+        value.disabled = true;
+      });
+      setFeedback("配置已加载");
+    }
+
+    function applyStatus(status) {
+      document.getElementById("version").textContent = `v${status.version}`;
+      document.getElementById("backend").textContent = status.backend;
+      document.getElementById("config-path").textContent = `配置文件：${status.config_file}`;
+      setConnection("feishu", status.connections.feishu, status.connections.feishu ? "凭证已就绪" : "等待完整凭证");
+      setConnection("qoder", status.connections.qoder, `${status.backend} · ${status.connections.qoder ? "PAT 已配置" : "PAT 未配置"}`);
+      setConnection("workspace", status.connections.workspace, status.connections.workspace ? "目录可访问" : "目录不可访问");
+    }
+
+    let mcpState = null;
+    const mcpSaveButton = document.getElementById("mcp-save-button");
+    const mcpFeedback = document.getElementById("mcp-feedback");
+
+    function setMcpFeedback(message, tone = "") {
+      mcpFeedback.textContent = message;
+      mcpFeedback.className = `feedback ${tone}`.trim();
+    }
+
+    function applyMcpConfig(state) {
+      mcpState = state;
+      const section = document.getElementById("mcp-section");
+      if (!state || !state.servers) {
+        section.classList.add("is-hidden");
+        return;
+      }
+      section.classList.remove("is-hidden");
+      const pathNote = document.getElementById("mcp-config-path");
+      pathNote.textContent = state.config_path || "未配置 MCP_SERVERS_CONFIG_PATH";
+      pathNote.title = state.config_path || "";
+
+      const parseError = document.getElementById("mcp-parse-error");
+      if (state.parse_error) {
+        parseError.textContent = `mcp.json 解析失败：${state.parse_error}`;
+        parseError.classList.remove("is-hidden");
+      } else {
+        parseError.classList.add("is-hidden");
+      }
+
+      document.getElementById("MCP_DMS_URL").value = state.servers["aliyun-dms-mcp-server"].url || "";
+      document.getElementById("MCP_OBS_URL").value = state.servers.observability.url || "";
+      document.getElementById("MCP_OBS_ENABLED").checked = Boolean(state.servers.observability.enabled);
+
+      mcpSecrets.forEach((secret) => {
+        const row = document.querySelector(`[data-secret="${secret.key}"]`);
+        const configured = Boolean(state.servers[secret.server]?.[secret.flag]);
+        const stateEl = row.querySelector('[data-role="state"]');
+        stateEl.textContent = configured ? "已配置" : "未配置";
+        stateEl.classList.toggle("configured", configured);
+        row.querySelector('[data-role="action"]').value = "keep";
+        const valueInput = row.querySelector('[data-role="value"]');
+        valueInput.value = "";
+        valueInput.disabled = true;
+      });
+      syncMcpServerFieldState();
+      setMcpFeedback("MCP 配置已加载");
+    }
+
+    function syncMcpServerFieldState() {
+      const enabled = document.getElementById("MCP_OBS_ENABLED").checked;
+      document.getElementById("MCP_OBS_URL").disabled = !enabled;
+      document.getElementById("mcp-obs-authorize-button").disabled = !enabled;
+    }
+
+    ["MCP_OBS_ENABLED"].forEach((id) => {
+      document.getElementById(id).addEventListener("change", () => {
+        syncMcpServerFieldState();
+        setMcpFeedback("有尚未保存的更改");
+      });
+    });
+
+    function secretUpdate(key) {
+      const row = document.querySelector(`[data-secret="${key}"]`);
+      return {
+        action: row.querySelector('[data-role="action"]').value,
+        value: row.querySelector('[data-role="value"]').value
+      };
+    }
+
+    function collectMcpPayload() {
+      return {
+        revision: mcpState.revision,
+        dms: {
+          enabled: true,
+          url: document.getElementById("MCP_DMS_URL").value,
+          token: secretUpdate("MCP_DMS_TOKEN")
+        },
+        observability: {
+          enabled: document.getElementById("MCP_OBS_ENABLED").checked,
+          url: document.getElementById("MCP_OBS_URL").value
+        }
+      };
+    }
+
+    async function loadMcpConfig() {
+      const response = await fetch("/admin/api/mcp", { cache: "no-store" });
+      if (!response.ok) throw new Error("无法读取 MCP 配置");
+      applyMcpConfig(await response.json());
+    }
+
+    const obsAuthorizeButton = document.getElementById("mcp-obs-authorize-button");
+    const obsAuthStatus = document.getElementById("mcp-obs-auth-status");
+    let obsPollTimer = null;
+
+    function setObsAuthStatus(message, tone = "") {
+      obsAuthStatus.textContent = message;
+      obsAuthStatus.className = `feedback ${tone}`.trim();
+    }
+
+    function describeObsStatus(data) {
+      const status = data?.status;
+      if (status === "connected") return "已授权";
+      if (status === "needs-auth") return "待授权：点击「授权」登录";
+      if (status === "pending") return "等待完成登录…";
+      if (status === "failed") return `连接失败${data.error ? `：${data.error}` : ""}`;
+      if (status === "disabled" || status === "absent") return "未启用";
+      return "状态未知";
+    }
+
+    async function refreshObsAuthStatus() {
+      try {
+        const response = await fetch("/admin/api/mcp/observability/status", { cache: "no-store" });
+        const data = await readJson(response);
+        if (!response.ok) throw new Error(data.detail || "无法读取授权状态");
+        setObsAuthStatus(describeObsStatus(data), data.status === "connected" ? "success" : "");
+        return data;
+      } catch (error) {
+        setObsAuthStatus(error.message || "授权状态读取失败", "error");
+        return null;
+      }
+    }
+
+    function startObsAuthPolling() {
+      if (obsPollTimer) return;
+      const deadline = Date.now() + 10 * 60 * 1000;
+      obsPollTimer = setInterval(async () => {
+        const data = await refreshObsAuthStatus();
+        if (data && (data.status === "connected" || data.status === "disabled")) {
+          clearInterval(obsPollTimer);
+          obsPollTimer = null;
+          obsAuthorizeButton.disabled = !document.getElementById("MCP_OBS_ENABLED").checked;
+        } else if (Date.now() > deadline) {
+          clearInterval(obsPollTimer);
+          obsPollTimer = null;
+          setObsAuthStatus("等待登录超时，请重试", "error");
+          obsAuthorizeButton.disabled = false;
+        }
+      }, 3000);
+    }
+
+    obsAuthorizeButton.addEventListener("click", async () => {
+      if (!document.getElementById("MCP_OBS_ENABLED").checked) return;
+      obsAuthorizeButton.disabled = true;
+      setObsAuthStatus("正在发起授权…");
+      try {
+        const response = await fetch("/admin/api/mcp/observability/authorize", {
+          method: "POST",
+          credentials: "same-origin"
+        });
+        const data = await readJson(response);
+        if (!response.ok) throw new Error(data.detail || "无法发起授权");
+        if (data.status === "connected") {
+          setObsAuthStatus("已授权", "success");
+          return;
+        }
+        if (!data.authUrl) throw new Error("CLI 未返回授权地址");
+        window.open(data.authUrl, "_blank", "noopener");
+        setObsAuthStatus("已在浏览器打开登录页，完成登录后自动更新状态");
+        startObsAuthPolling();
+      } catch (error) {
+        setObsAuthStatus(error.message || "授权失败", "error");
+        obsAuthorizeButton.disabled = false;
+      }
+    });
+
+    mcpSaveButton.addEventListener("click", async () => {
+      if (!mcpState || !mcpState.servers) return;
+      const payload = collectMcpPayload();
+      mcpSaveButton.disabled = true;
+      setMcpFeedback("正在保存…");
+      try {
+        const response = await fetch("/admin/api/mcp", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify(payload)
+        });
+        const result = await readJson(response);
+        if (!response.ok) {
+          if (response.status === 409) {
+            throw new Error("配置已被外部修改，请点击「放弃更改」重新加载后再试");
+          }
+          throw new Error(result.detail || "MCP 配置保存失败");
+        }
+        await loadMcpConfig();
+        setMcpFeedback("已保存，新会话立即生效", "success");
+      } catch (error) {
+        setMcpFeedback(error.message || "MCP 配置保存失败", "error");
+      } finally {
+        mcpSaveButton.disabled = false;
+      }
+    });
+
+    async function readJson(response) {
+      try {
+        return await response.json();
+      } catch {
+        return {};
+      }
+    }
+
+    async function load() {
+      try {
+        const [statusResponse, configResponse] = await Promise.all([
+          fetch("/admin/api/status", { cache: "no-store" }),
+          fetch("/admin/api/config", { cache: "no-store" })
+        ]);
+        if (!statusResponse.ok || !configResponse.ok) throw new Error("无法读取本地配置");
+        const status = await statusResponse.json();
+        configState = await configResponse.json();
+        applyStatus(status);
+        applyConfig(configState);
+        loading.classList.add("is-hidden");
+        form.classList.remove("is-hidden");
+      } catch (error) {
+        loading.textContent = error.message || "配置加载失败";
+        loading.style.color = "var(--red)";
+      }
+      try {
+        await loadMcpConfig();
+        await refreshObsAuthStatus();
+      } catch (error) {
+        setMcpFeedback(error.message || "MCP 配置加载失败", "error");
+      }
+    }
+
+    function collectPayload() {
+      const values = {};
+      editableKeys.forEach((key) => {
+        values[key] = document.getElementById(key).value;
+      });
+      const secretUpdates = {};
+      secrets.forEach((secret) => {
+        const row = document.querySelector(`[data-secret="${secret.key}"]`);
+        secretUpdates[secret.key] = {
+          action: row.querySelector('[data-role="action"]').value,
+          value: row.querySelector('[data-role="value"]').value
+        };
+      });
+      return { revision: configState.revision, values, secrets: secretUpdates };
+    }
+
+    form.addEventListener("input", (event) => {
+      if (event.target.closest(".secret-control")) return;
+      if (event.target.closest("#mcp-section")) setMcpFeedback("有尚未保存的更改");
+      else setFeedback("有尚未保存的更改");
+    });
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (!form.reportValidity()) return;
+      const payload = collectPayload();
+      const clearing = secrets.filter((secret) => payload.secrets[secret.key].action === "clear");
+      if (clearing.length) {
+        const names = clearing.map((secret) => secret.label).join("、");
+        if (!window.confirm(`确认清除 ${names}？保存后无法恢复。`)) return;
+      }
+      saveButton.disabled = true;
+      setFeedback("正在保存…");
+      try {
+        const response = await fetch("/admin/api/config", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify(payload)
+        });
+        const result = await readJson(response);
+        if (!response.ok) {
+          throw new Error(result.detail || "配置保存失败");
+        }
+        configState.revision = result.revision;
+        Object.entries(result.secrets).forEach(([key, value]) => {
+          configState.secrets[key] = value;
+        });
+        applyConfig(configState);
+        setFeedback("已保存。重启 gateway 与 events 后生效", "success");
+      } catch (error) {
+        setFeedback(error.message || "配置保存失败", "error");
+      } finally {
+        saveButton.disabled = false;
+      }
+    });
+
+    document.getElementById("discard-button").addEventListener("click", async () => {
+      applyConfig(configState);
+      setFeedback("已放弃未保存的更改");
+      try {
+        await loadMcpConfig();
+        setMcpFeedback("已放弃未保存的更改");
+      } catch {
+        /* MCP 配置加载失败时保留现有展示 */
+      }
+    });
+
+    renderSecretControls();
+    renderMcpSecretControls();
+    load();
+  </script>
+</body>
+</html>
