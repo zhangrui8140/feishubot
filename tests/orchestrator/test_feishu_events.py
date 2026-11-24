@@ -538,7 +538,7 @@ async def test_help_command_lists_commands(runtime):
         (
             True,
             2,
-            "当前有分析正在进行，另有 2 个问题排队。发送「补充 …」可并入当前分析，新问题将排队单独回答；「终止」停止。",
+            "当前有分析正在进行，另有 2 个问题排队。发送「补充：…」可并入当前分析，新问题将排队单独回答；「终止」停止。",
         ),
     ],
 )
@@ -703,4 +703,84 @@ async def test_bare_mention_replies_with_help(runtime):
 
     assert service.requests == []
     assert channel.replies == [("message-12345678", chat_commands.HELP_TEXT)]
+
+
+@pytest.mark.asyncio
+async def test_dev_mode_rejects_unlisted_sender(runtime, monkeypatch):
+    channel, service = runtime
+    monkeypatch.setattr(feishu_events.settings, "qoder_agent_mode", "dev")
+    monkeypatch.setattr(feishu_events.settings, "qoder_dev_allowed_open_ids", "ou_owner")
+
+    await feishu_events.process_p2_im_message_receive_v1(
+        make_event(user_open_id="ou_intruder")
+    )
+
+    assert service.requests == []
+    assert channel.replies == [("message-12345678", "该机器人仅对授权用户开放。")]
+
+
+@pytest.mark.asyncio
+async def test_dev_mode_empty_whitelist_denies_everyone(runtime, monkeypatch):
+    channel, service = runtime
+    monkeypatch.setattr(feishu_events.settings, "qoder_agent_mode", "dev")
+    monkeypatch.setattr(feishu_events.settings, "qoder_dev_allowed_open_ids", "")
+
+    await feishu_events.process_p2_im_message_receive_v1(
+        make_event(user_open_id="ou_owner")
+    )
+
+    assert service.requests == []
+    assert channel.replies == [("message-12345678", "该机器人仅对授权用户开放。")]
+
+
+@pytest.mark.asyncio
+async def test_dev_mode_allows_listed_sender(runtime, monkeypatch):
+    channel, service = runtime
+    monkeypatch.setattr(feishu_events.settings, "qoder_agent_mode", "dev")
+    monkeypatch.setattr(
+        feishu_events.settings, "qoder_dev_allowed_open_ids", "ou_owner, ou_other"
+    )
+
+    await feishu_events.process_p2_im_message_receive_v1(
+        make_event(user_open_id="ou_owner")
+    )
+
+    assert len(service.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_readonly_mode_ignores_dev_whitelist(runtime, monkeypatch):
+    channel, service = runtime
+    monkeypatch.setattr(feishu_events.settings, "qoder_agent_mode", "readonly")
+    monkeypatch.setattr(feishu_events.settings, "qoder_dev_allowed_open_ids", "")
+
+    await feishu_events.process_p2_im_message_receive_v1(make_event())
+
+    assert len(service.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_worker_runtime_keeps_contexts_when_cards_disabled(tmp_path, monkeypatch):
+    class CapturingService:
+        def __init__(self, config):
+            pass
+
+        async def start(self):
+            return None
+
+    monkeypatch.setattr(feishu_events.settings, "feishu_agent_backend", "qoder_sdk")
+    monkeypatch.setattr(feishu_events.settings, "qoder_diagnosis_cards_enabled", False)
+    monkeypatch.setattr(feishu_events, "QoderAgentService", CapturingService)
+    monkeypatch.setattr(feishu_events, "_qoder_agent_service", None)
+    monkeypatch.setattr(feishu_events, "_diagnosis_runtime", None)
+    monkeypatch.setattr(feishu_events, "channel_client", FakeChannel())
+    monkeypatch.setattr(feishu_events, "_handoff", None)
+    monkeypatch.setattr(feishu_events.settings, "qoder_handoff_dir", "")
+    monkeypatch.setattr(
+        feishu_events.settings, "qoder_diagnosis_store_dir", str(tmp_path / "diagnoses")
+    )
+
+    await feishu_events._initialize_worker_runtime()
+
+    assert feishu_events._diagnosis_runtime is not None
 

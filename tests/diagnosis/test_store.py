@@ -100,3 +100,20 @@ def test_path_unsafe_diagnosis_id_is_rejected(tmp_path, context):
 
     assert not store.save(replace(context, diagnosis_id="../escape"))
     assert store.get("../escape") is None
+
+
+def test_index_message_maps_extra_reply_to_context(tmp_path, context):
+    store = DiagnosisStore(tmp_path)
+    store.save(context)
+
+    assert store.index_message("bot-reply-1", "diag-1")
+    assert DiagnosisStore(tmp_path).get_by_message_id("bot-reply-1") == context
+
+
+def test_index_message_rejects_unsafe_or_disabled(tmp_path, context):
+    store = DiagnosisStore(tmp_path)
+    store.save(context)
+
+    assert not store.index_message("", "diag-1")
+    assert not store.index_message("bot-reply-1", "../escape")
+    assert not DiagnosisStore(None).index_message("bot-reply-1", "diag-1")

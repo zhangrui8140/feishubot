@@ -246,3 +246,47 @@ async def test_terminal_state_ignores_late_progress(tmp_path, context):
 
     assert len(channel.patched) == patch_count
     assert controller.context.status == DiagnosisStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_cards_disabled_start_uses_fallback_without_card(tmp_path, context):
+    channel = FakeChannel()
+    fallback = []
+    controller = make_controller(tmp_path, context, channel, fallback, cards_enabled=False)
+
+    await controller.start("已受理")
+    await controller.progress(AgentProgress(kind="assistant_text", text="阶段结果"))
+    await controller.finish(DiagnosisStatus.COMPLETED, "最终结果")
+
+    assert channel.sent == []
+    assert channel.replied == []
+    assert channel.patched == []
+    assert fallback == ["已受理", "阶段结果", "最终结果"]
+    assert controller.context.card_message_id is None
+    assert DiagnosisStore(tmp_path).get(context.diagnosis_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_fallback_reply_id_is_indexed_for_quote_reply(tmp_path, context):
+    channel = FakeChannel()
+    sent: list[str] = []
+
+    async def fallback(text: str) -> str:
+        sent.append(text)
+        return f"bot-reply-{len(sent)}"
+
+    controller = DiagnosisController(
+        channel,
+        DiagnosisStore(tmp_path),
+        context,
+        fallback,
+        patch_interval_seconds=0,
+        cards_enabled=False,
+    )
+
+    await controller.start("已受理")
+    await controller.finish(DiagnosisStatus.COMPLETED, "最终结果")
+
+    store = DiagnosisStore(tmp_path)
+    assert store.get_by_message_id("bot-reply-1") == controller.context
+    assert store.get_by_message_id("bot-reply-2") == controller.context

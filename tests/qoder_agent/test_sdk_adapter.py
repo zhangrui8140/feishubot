@@ -98,6 +98,56 @@ async def test_session_handle_collects_result_and_tools():
     assert result.tool_names == ("Grep",)
 
 
+@pytest.mark.asyncio
+async def test_permission_denials_with_successful_result_are_tolerated():
+    client = FakeClient(
+        [
+            ResultMessage(
+                subtype="success",
+                duration_ms=1,
+                duration_api_ms=1,
+                is_error=False,
+                num_turns=1,
+                session_id="session-1",
+                result="已改用只读方式完成",
+                permission_denials=[{"tool_name": "Bash", "message": "denied"}],
+            )
+        ]
+    )
+    handle = QoderSessionHandle(client)
+    await handle.start()
+    try:
+        outcome = await handle.run("任务")
+    finally:
+        await handle.disconnect()
+
+    assert outcome.text == "已改用只读方式完成"
+
+
+@pytest.mark.asyncio
+async def test_permission_denials_with_error_result_raise_permission_error():
+    client = FakeClient(
+        [
+            ResultMessage(
+                subtype="error_during_execution",
+                duration_ms=1,
+                duration_api_ms=1,
+                is_error=True,
+                num_turns=1,
+                session_id="session-1",
+                permission_denials=[{"tool_name": "Bash", "message": "denied"}],
+            )
+        ]
+    )
+    handle = QoderSessionHandle(client)
+    await handle.start()
+    try:
+        with pytest.raises(session_handle.QoderSdkPermissionError):
+            await handle.run("任务")
+    finally:
+        await handle.disconnect()
+
+
 def _result(text: str) -> ResultMessage:
     return ResultMessage(
         subtype="success",
