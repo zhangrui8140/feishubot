@@ -242,11 +242,17 @@ class QoderSessionHandle:
 
         if result_message is None:
             raise QoderSdkRunError("Qoder SDK response ended without a result message")
-        if result_message.permission_denials:
-            raise QoderSdkPermissionError("Qoder SDK denied a requested tool")
         if result_message.is_error:
+            if result_message.permission_denials:
+                raise QoderSdkPermissionError("Qoder SDK denied a requested tool")
             details = "; ".join(result_message.errors or [])
             raise QoderSdkRunError(details or result_message.subtype)
+        if result_message.permission_denials:
+            # The agent recovered from the denied tool calls and still finished the turn.
+            logger.warning(
+                "Qoder SDK denied %d tool call(s), but the turn completed successfully",
+                len(result_message.permission_denials),
+            )
 
         text = (result_message.result or latest_text).strip()
         if not text:

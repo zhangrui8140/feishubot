@@ -14,9 +14,16 @@ from feishubot.qoder_agent.projects import mentioned_projects
 
 
 class DiagnosisRuntime:
-    def __init__(self, channel: CardChannel, store: DiagnosisStore) -> None:
+    def __init__(
+        self,
+        channel: CardChannel,
+        store: DiagnosisStore,
+        *,
+        cards_enabled: bool = True,
+    ) -> None:
         self._channel = channel
         self._store = store
+        self._cards_enabled = cards_enabled
         self._active: dict[str, DiagnosisController] = {}
 
     @property
@@ -34,7 +41,7 @@ class DiagnosisRuntime:
         owner_open_id: str,
         session_key: str,
         available_projects: tuple[str, ...],
-        fallback: Callable[[str], Awaitable[None]],
+        fallback: Callable[[str], Awaitable[str | None]],
         reuse: DiagnosisContext | None = None,
     ) -> DiagnosisController:
         previous = reuse or self.context_from_reply(message, owner_open_id, check_owner=False)
@@ -57,7 +64,13 @@ class DiagnosisRuntime:
             updated_at=now,
             round_index=previous.round_index + 1 if previous else 0,
         )
-        controller = DiagnosisController(self._channel, self._store, context, fallback)
+        controller = DiagnosisController(
+            self._channel,
+            self._store,
+            context,
+            fallback,
+            cards_enabled=self._cards_enabled,
+        )
         self._active[session_key] = controller
         return controller
 

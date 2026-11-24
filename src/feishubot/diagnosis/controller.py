@@ -48,16 +48,17 @@ class DiagnosisController:
         channel: CardChannel,
         store: DiagnosisStore,
         context: DiagnosisContext,
-        fallback: Callable[[str], Awaitable[None]],
+        fallback: Callable[[str], Awaitable[str | None]],
         *,
         patch_interval_seconds: float = _PATCH_INTERVAL_SECONDS,
+        cards_enabled: bool = True,
     ) -> None:
         self._channel = channel
         self._store = store
         self._context = context
         self._fallback = fallback
         self._patch_interval_seconds = patch_interval_seconds
-        self._cards_available = True
+        self._cards_available = cards_enabled
         self._last_payload = ""
         self._last_patch_at = 0.0
         self._pending_patch: asyncio.Task[None] | None = None
@@ -89,6 +90,9 @@ class DiagnosisController:
 
     async def start(self, fallback_text: str) -> None:
         self._store.save(self._context)
+        if not self._cards_available:
+            await self._emit_fallback(fallback_text)
+            return
         if self._context.card_message_id:
             await self._patch(force=True, fallback_text=fallback_text)
             return
@@ -110,7 +114,7 @@ class DiagnosisController:
             except Exception:  # noqa: BLE001
                 logger.warning("Failed to create diagnosis card", exc_info=True)
                 self._cards_available = False
-        await self._fallback(fallback_text)
+        await self._emit_fallback(fallback_text)
 
     async def progress(self, event: AgentProgress) -> None:
         if self._context.status in _TERMINAL_STATUSES:
@@ -160,6 +164,11 @@ class DiagnosisController:
         self._context = replace(self._context, updated_at=utc_now(), **changes)
         self._store.save(self._context)
 
+    async def _emit_fallback(self, text: str) -> None:
+        reply_id = await self._fallback(text)
+        if reply_id:
+            self._store.index_message(reply_id, self._context.diagnosis_id)
+
     async def _create_card(self) -> dict[str, Any]:
         card = render_card(self._context)
         if self._context.chat_type == "group":
@@ -179,7 +188,7 @@ class DiagnosisController:
     async def _patch(self, *, force: bool = False, fallback_text: str | None = None) -> bool:
         if not self._cards_available or not self._context.card_message_id:
             if fallback_text:
-                await self._fallback(fallback_text)
+                await self._emit_fallback(fallback_text)
             return False
         payload = self._payload()
         if payload == self._last_payload:
@@ -199,7 +208,7 @@ class DiagnosisController:
             logger.warning("Failed to patch diagnosis card", exc_info=True)
             self._cards_available = False
             if fallback_text:
-                await self._fallback(fallback_text)
+                await self._emit_fallback(fallback_text)
             return False
         self._last_payload = payload
         self._last_patch_at = now

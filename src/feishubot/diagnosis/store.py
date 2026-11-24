@@ -72,6 +72,20 @@ class DiagnosisStore:
             except (KeyError, TypeError, ValueError):
                 return None
 
+    def index_message(self, message_id: str, diagnosis_id: str) -> bool:
+        """Map an extra message (e.g. a plain-text bot reply) to a diagnosis."""
+        if self._directory is None or not message_id or not _safe_id(diagnosis_id):
+            return False
+        with self._lock:
+            try:
+                self._atomic_write(
+                    self._message_path(message_id),
+                    {"diagnosis_id": diagnosis_id},
+                )
+            except OSError:
+                return False
+        return True
+
     def get_by_card_message_id(self, card_message_id: str) -> DiagnosisContext | None:
         if self._directory is None or not card_message_id:
             return None
