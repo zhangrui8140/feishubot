@@ -13,6 +13,7 @@
 ## 2. 项目与关键路径
 
 - 仓库：`D:\workspace\projects\qoderwork\agent\feishubot`（Python 3.12 venv，uv 管理，qoder_agent_sdk 1.0.15 后端，lark-oapi websocket 长连接）。**agent 目录已于 2026-11-24 由用户加入 IDE 工作区，仓库内文件可直接用 Write/SearchReplace 编辑，不再需要提权补丁中转。**
+- **git 状态（2026-11-24 已整理）**：全部改动已按功能分组提交到 feature 分支 `feat/dev-full-capability`（7 个 commit：qoder-agent 后端 / orchestrator / admin / infra / tests / chore 脚本 / docs），基底为 main 的 v0.2.0（c1e2239）；main 本身未动，未 push。`.env.dev`/`.env` 已被 gitignore（含密钥不入库），`logs/` 已加入 gitignore。运行中的 readonly/dev 两个机器人进程不受提交影响；**注意：机器人从本工作目录运行，不要随意 checkout main，否则重启后会回退到 v0.2.0 旧代码**。
 - 环境文件：`D:\workspace\projects\qoderwork\agent\feishubot\.env.dev`（QODER_AGENT_MODE=dev、QODER_WORKSPACE_ROOT=D:\workspace\projects\qoderwork\dev、QODER_MODEL=GLM-5.3-Flash、并发 4/8）
 - 启动脚本：`start-feishubot-dev.cmd`；实际运行方式：`$env:FEISHUBOT_ENV_FILE="...\.env.dev"; .venv\Scripts\python.exe -c "from feishubot.cli import main; main(['events','--no-fallback-webhook','--log-level','INFO'])"`（后台）
 - 核心源码（均已改完并验证）：
