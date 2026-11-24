@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from feishubot.qoder_agent.tool_policy import (
@@ -305,4 +307,87 @@ def test_observability_prod_only_configuration(tmp_path):
         {"query": LOG_QUERY, "start": START, "end": END, "limit": 20},
     )
     assert denial is None
+
+
+@pytest.fixture
+def knowledge_setup(tmp_path):
+    workspace = tmp_path / "prod"
+    workspace.mkdir()
+    knowledge = tmp_path / "rui"
+    knowledge.mkdir()
+    policy = ToolPolicy(workspace, (DMS_SERVER,), knowledge_dir=knowledge)
+    return policy, workspace, knowledge
+
+
+def test_knowledge_read_and_rules_root_allowed(knowledge_setup):
+    policy, _workspace, knowledge = knowledge_setup
+    assert policy.denial_reason(
+        "Read", {"file_path": str(knowledge / "erp-purchase-dev" / "index.md")}
+    ) is None
+    rules_file = Path.home() / ".qoder" / "rules" / "00-rule-index.md"
+    assert policy.denial_reason("Read", {"file_path": str(rules_file)}) is None
+    assert policy.denial_reason("Read", {"file_path": str(knowledge / ".." / "evil.txt")}) is not None
+
+
+def test_knowledge_write_limited_to_md(knowledge_setup):
+    policy, _workspace, knowledge = knowledge_setup
+    assert policy.denial_reason("Write", {"file_path": str(knowledge / "scm-dev" / "modules" / "x.md")}) is None
+    assert policy.denial_reason("Edit", {"file_path": "scm-dev/modules/x.md"}) is None
+    assert policy.denial_reason("Write", {"file_path": str(knowledge / "x.java")}) is not None
+    assert policy.denial_reason("Write", {"file_path": str(knowledge / ".env")}) is not None
+    assert policy.denial_reason("Write", {"file_path": str(knowledge / ".." / "outside.md")}) is not None
+
+
+def test_knowledge_disabled_keeps_write_ban(policy):
+    assert policy.denial_reason("Write", {"file_path": "a.md"}) is not None
+    assert policy.denial_reason("Bash", {"command": "git log"}) is not None
+    assert "Write" not in policy.allowed_tools
+
+
+def test_knowledge_enabled_tools_and_glob(knowledge_setup):
+    policy, _workspace, knowledge = knowledge_setup
+    assert {"Write", "Edit", "Bash"} <= set(policy.allowed_tools)
+    assert policy.denial_reason("Glob", {"pattern": str(knowledge / "**" / "*.md")}) is None
+    assert policy.denial_reason("Glob", {"pattern": r"C:\other\**\*"}) is not None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git log --since=2026-11-16 --oneline -- src/A.java",
+        "git -C erp-mall-prod log --oneline -5",
+        "git diff prod...HEAD --name-only",
+        "git show HEAD --stat",
+        "git status",
+        "git rev-parse --abbrev-ref HEAD",
+        "git ls-files",
+    ],
+)
+def test_readonly_bash_allows_single_readonly_git(knowledge_setup, command):
+    policy, _workspace, _knowledge = knowledge_setup
+    assert policy.denial_reason("Bash", {"command": command}) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git push origin HEAD:feature-x",
+        "git commit -m x",
+        "git checkout prod",
+        "git log; rm -rf /",
+        "git log && git push",
+        "git log | tee out.txt",
+        "git log > out.txt",
+        "git -c core.pager=evil log",
+        "git diff --output=evil.patch",
+        "git diff --no-index a b",
+        "git -C ../../ log",
+        "ls -la",
+        "echo $(git log)",
+        "git log\nrm -rf /",
+    ],
+)
+def test_readonly_bash_denies_everything_else(knowledge_setup, command):
+    policy, _workspace, _knowledge = knowledge_setup
+    assert policy.denial_reason("Bash", {"command": command}) is not None
 

@@ -108,3 +108,25 @@ def test_mentioned_dev_projects() -> None:
         "erp-purchase-dev",
     )
     assert mentioned_dev_projects("和项目无关的消息", projects) == ()
+
+
+def test_dev_knowledge_base_outside_workspace(tmp_path: Path) -> None:
+    workspace = tmp_path / "dev"
+    workspace.mkdir()
+    knowledge = tmp_path / "rui"
+    knowledge.mkdir()
+    policy = DevToolPolicy(workspace, knowledge_dir=knowledge)
+
+    assert policy.denial_reason(
+        "Read", {"file_path": str(knowledge / "scm-dev" / "index.md")}
+    ) is None
+    assert policy.denial_reason(
+        "Write", {"file_path": str(knowledge / "scm-dev" / "modules" / "x.md")}
+    ) is None
+    assert policy.denial_reason(
+        "Write", {"file_path": str(knowledge / "scm-dev" / "x.java")}
+    ) is not None
+    # Workspace writes keep their original freedom.
+    assert policy.denial_reason(
+        "Write", {"file_path": str(workspace / "erp-purchase-dev" / "A.java")}
+    ) is None

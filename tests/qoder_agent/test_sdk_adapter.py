@@ -394,7 +394,9 @@ async def test_adapter_passes_restricted_mcp_options(tmp_path, monkeypatch):
         "mcp_call",
     }
     assert set(options.tools) == set(options.allowed_tools)
-    assert "observability" not in options.system_prompt
+    # The user rules index mentions observability as a routing entry; what must
+    # stay out without the server is the concrete query guidance.
+    assert "victorialogs_query" not in options.system_prompt
     assert "aliyun-dms-mcp-server" in options.system_prompt
     assert "executeScript" in options.system_prompt
     assert "createDataChangeOrder" in options.system_prompt
@@ -835,3 +837,93 @@ async def test_permission_hook_and_callback_share_policy(tmp_path):
     assert callback_result.message
     assert hook_result["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert hook_result["hookSpecificOutput"]["permissionDecisionReason"] == callback_result.message
+
+
+def _knowledge_adapter(tmp_path, *, mode="readonly", with_knowledge=True):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    knowledge = tmp_path / "rui"
+    knowledge.mkdir(exist_ok=True)
+    mcp_config = tmp_path / "mcp.json"
+    mcp_config.write_text(
+        '{"mcpServers":{"aliyun-dms-mcp-server":{"url":"https://dms.example/sse"}}}',
+        encoding="utf-8",
+    )
+    return QoderSdkAdapter(
+        workspace_root=workspace,
+        model="auto",
+        mcp_servers_config_path=mcp_config,
+        mode=mode,
+        knowledge_dir=knowledge if with_knowledge else None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_readonly_knowledge_sharing_opens_guarded_tools(tmp_path, monkeypatch):
+    adapter = _knowledge_adapter(tmp_path)
+    captured = {}
+
+    class CapturingClient(FakeClient):
+        def __init__(self, *, options):
+            super().__init__([])
+            captured["options"] = options
+
+    monkeypatch.setattr(sdk_adapter, "QoderSDKClient", CapturingClient)
+    monkeypatch.setattr(QoderSdkAdapter, "_auth", lambda self: object())
+
+    handle = await adapter.open_session()
+    await handle.disconnect()
+
+    options = captured["options"]
+    assert {"Write", "Edit", "Bash"} <= set(options.allowed_tools)
+    assert options.disallowed_tools == []
+    prompt = options.system_prompt
+    assert "共享知识库" in prompt
+    assert "RUI-02" in prompt
+    assert "用户级规则库" in prompt
+    assert "ERP 代码仍只读" in prompt
+
+
+@pytest.mark.asyncio
+async def test_readonly_without_knowledge_keeps_write_ban(tmp_path, monkeypatch):
+    adapter = _knowledge_adapter(tmp_path, with_knowledge=False)
+    captured = {}
+
+    class CapturingClient(FakeClient):
+        def __init__(self, *, options):
+            super().__init__([])
+            captured["options"] = options
+
+    monkeypatch.setattr(sdk_adapter, "QoderSDKClient", CapturingClient)
+    monkeypatch.setattr(QoderSdkAdapter, "_auth", lambda self: object())
+
+    handle = await adapter.open_session()
+    await handle.disconnect()
+
+    options = captured["options"]
+    assert set(options.disallowed_tools) == {"Write", "Edit", "Bash"}
+    assert "共享知识库" not in options.system_prompt
+    # User rules stay aligned with the IDE even without knowledge sharing.
+    assert "用户级规则库" in options.system_prompt
+
+
+@pytest.mark.asyncio
+async def test_dev_knowledge_prompt_marks_base_as_non_project(tmp_path, monkeypatch):
+    adapter = _knowledge_adapter(tmp_path, mode="dev")
+    captured = {}
+
+    class CapturingClient(FakeClient):
+        def __init__(self, *, options):
+            super().__init__([])
+            captured["options"] = options
+
+    monkeypatch.setattr(sdk_adapter, "QoderSDKClient", CapturingClient)
+    monkeypatch.setattr(QoderSdkAdapter, "_auth", lambda self: object())
+
+    handle = await adapter.open_session()
+    await handle.disconnect()
+
+    prompt = captured["options"].system_prompt
+    assert "共享知识库" in prompt
+    assert "知识库不是开发项目" in prompt
+    assert "RUI-03" in prompt
