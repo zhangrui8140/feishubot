@@ -84,6 +84,8 @@ class QoderServiceConfig:
     session_idle_ttl_seconds: float = 1800.0
     dedup_ttl_seconds: float = 86400.0
     domain_knowledge_dir: Path | None = None
+    # Shared rui knowledge base; None disables knowledge sharing.
+    knowledge_dir: Path | None = None
     # "readonly" (prod analysis) or "dev" (dev worktree development tasks).
     mode: str = "readonly"
     max_buffer_size_bytes: int = 32 * 1024 * 1024
@@ -128,6 +130,7 @@ class QoderAgentService:
             domain_knowledge_enabled=self._domain is not None,
             max_buffer_size=config.max_buffer_size_bytes,
             mode=config.mode,
+            knowledge_dir=config.knowledge_dir,
         )
         self._session_store = session_store or QoderSessionStore(config.session_store_dir)
         self._semaphore = asyncio.Semaphore(config.max_concurrent_runs)

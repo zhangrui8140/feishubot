@@ -90,6 +90,9 @@ class Settings(BaseSettings):
     qoder_diagnosis_store_dir: str = str(Path.home() / ".feishubot" / "diagnoses")
     # Comma-separated open_ids allowed to trigger dev-mode tasks; empty denies everyone.
     qoder_dev_allowed_open_ids: str = ""
+    # Shared rui knowledge base; empty disables knowledge sharing and the
+    # read-only git / knowledge-write allowances that come with the RUI protocol.
+    qoder_knowledge_dir: str = ""
 
     def _load_models_from_toml(self, config_path: Path) -> tuple[str, dict[str, dict[str, Any]]]:
         if not config_path.exists():

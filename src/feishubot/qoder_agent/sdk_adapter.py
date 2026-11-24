@@ -82,7 +82,7 @@ approveOrder、getOrderInfo、askDatabase 等），它们不在只读白名单�
 _PROJECT_SCOPE_PROMPT = """
 分析范围仅限 prod 环境项目：{projects}（均为当前工作区下的同名目录）。
 用户指定项目时只在该项目目录内分析；未指定时按问题判断最相关的项目，并在【分析思路】中说明选了哪个。
-dev、pre、test 等其他环境或其他目录一律不读取；用户要求分析其他环境时，说明当前只支持 prod 环境。
+dev、pre、test 等其他环境或其他目录一律不读取（共享知识库与用户级规则目录除外）；用户要求分析其他环境时，说明当前只支持 prod 环境。
 """
 _DOMAIN_KNOWLEDGE_PROMPT = """
 领域知识复用（用于减少重复读代码，优先级高于“代码结论必须引用行号”的取证要求）：
@@ -142,12 +142,12 @@ _DEV_SYSTEM_PROMPT = """你是本地 ERP 开发 Agent，在 dev 工作区执行�
 _DEV_PROJECT_SCOPE_PROMPT = """
 开发范围仅限 dev 工作区项目：{projects}（均为当前工作区下的同名 worktree 目录）。
 用户指定项目时只在该项目目录内开发；未指定时按任务判断最相关的项目，并在【分析思路】中说明选了哪个。
-工作区外的其他目录一律不读取不修改。
+工作区外的其他目录一律不读取不修改（共享知识库与用户级规则/skills 目录除外）。
 """
 
 
-def _build_rules_prompt(rules_dir: Path) -> str:
-    """Inject the always-on user rules so dev tasks follow the same standards as the IDE."""
+def _build_rules_prompt(rules_dir: Path, *, skills_available: bool = True) -> str:
+    """Inject the always-on user rules so tasks follow the same standards as the IDE."""
     parts = ["\n用户级规则库（必须遵守，与 Qoder IDE 会话一致）："]
     for name in ("00-rule-index.md", "coding-standard.md"):
         try:
@@ -156,12 +156,45 @@ def _build_rules_prompt(rules_dir: Path) -> str:
             continue
         if content:
             parts.append(f"--- {name} ---\n{content}")
-    parts.append(
+    tail = (
         f"其余主题规则文件位于 {rules_dir}，按 00-rule-index.md 的任务路由表在动手前用 Read 读取对应文件全文。"
-        "用户级 skills 已随会话加载，可用 Skill 工具调用（如 quality-case、tdd、diagnosing-bugs、dev-flow 等）。"
+    )
+    if skills_available:
+        tail += "用户级 skills 已随会话加载，可用 Skill 工具调用（如 quality-case、tdd、diagnosing-bugs、dev-flow 等）。"
+    tail += (
         "项目级 skills（如 scm-business-check）位于目标项目的 .claude/skills 与 .qoder/skills 目录，"
         "涉及对应业务时先 Read 其 SKILL.md 再按其流程执行。"
     )
+    parts.append(tail)
+    return "\n".join(parts) + "\n"
+
+
+def _build_knowledge_prompt(knowledge_dir: Path, rules_dir: Path, *, mode: str) -> str:
+    """Inject the shared rui knowledge base and the RUI protocol facts source."""
+    parts = [
+        f"\n共享知识库（rui 集中库，所有项目的业务流程知识统一存放于此）：{knowledge_dir}",
+        "全局路由表为该目录下的 index.md；{项目}\\index.md 是模块索引，{项目}\\modules\\{模块}.md 是模块知识。",
+        "项目归属：用目标项目目录名（不是工作区根目录）与知识库一级目录做最长前缀匹配"
+        "（知识库项目目录名是目标项目目录名的前缀且后随 - 或完全相等；worktree 归基项目，不单独建档）。",
+    ]
+    try:
+        protocol = (rules_dir / "rui-iteration-protocol.md").read_text(encoding="utf-8").strip()
+    except OSError:
+        protocol = ""
+    if protocol:
+        parts.append(f"协议事实源（必须遵守）：\n{protocol}")
+    if mode == "dev":
+        parts.append(
+            "知识库不是开发项目：只在其中读写 .md 知识文档，遵循 RUI-01~04；"
+            "迭代后按 RUI-03 在变更记录区块头部追加并同步索引日期。"
+        )
+    else:
+        parts.append(
+            "回答业务流程问题前先按 RUI-02 查知识库定位模块并做一致性校验（只读 git 命令已放行），"
+            "命中且代码无变更时直接以文档结论作答并声明依据；"
+            "查询产出可复用业务代码流程知识时按 RUI-04 门槛写入知识库（仅 .md，错误日志类不登记）。"
+            "ERP 代码仍只读；Bash 仅允许单条只读 git 命令（log/diff/show/status/rev-parse/ls-files）。"
+        )
     return "\n".join(parts) + "\n"
 
 
@@ -176,6 +209,7 @@ class QoderSdkAdapter:
         domain_knowledge_enabled: bool = False,
         max_buffer_size: int = 32 * 1024 * 1024,
         mode: str = "readonly",
+        knowledge_dir: str | Path | None = None,
     ) -> None:
         self._workspace_root = Path(workspace_root).expanduser().resolve()
         self._model = model
@@ -186,10 +220,13 @@ class QoderSdkAdapter:
             else None
         )
         self._mode = mode.strip().lower()
+        self._knowledge_dir = (
+            Path(knowledge_dir).expanduser().resolve() if knowledge_dir else None
+        )
         self._policy = (
-            DevToolPolicy(self._workspace_root)
+            DevToolPolicy(self._workspace_root, knowledge_dir=self._knowledge_dir)
             if self._mode == "dev"
-            else ToolPolicy(self._workspace_root)
+            else ToolPolicy(self._workspace_root, knowledge_dir=self._knowledge_dir)
         )
         self._domain_knowledge_enabled = domain_knowledge_enabled
         self._max_buffer_size = max_buffer_size
@@ -228,6 +265,10 @@ class QoderSdkAdapter:
             system_prompt = _DEV_SYSTEM_PROMPT + _build_rules_prompt(
                 self._user_qoder_dir / "rules"
             )
+            if self._knowledge_dir is not None:
+                system_prompt += _build_knowledge_prompt(
+                    self._knowledge_dir, self._user_qoder_dir / "rules", mode="dev"
+                )
             if DMS_SERVER in policy.mcp_server_names:
                 system_prompt += _DMS_PROMPT
             if policy.observability_enabled:
@@ -252,13 +293,22 @@ class QoderSdkAdapter:
                 system_prompt += _PROJECT_SCOPE_PROMPT.format(projects="、".join(projects))
             if self._domain_knowledge_enabled:
                 system_prompt += _DOMAIN_KNOWLEDGE_PROMPT
+            system_prompt += _build_rules_prompt(
+                self._user_qoder_dir / "rules", skills_available=False
+            )
+            if self._knowledge_dir is not None:
+                system_prompt += _build_knowledge_prompt(
+                    self._knowledge_dir, self._user_qoder_dir / "rules", mode="readonly"
+                )
         options = QoderAgentOptions(
             auth=self._auth(),
             cwd=self._workspace_root,
             model=self._model,
             tools=None if self._mode == "dev" else list(policy.allowed_tools),
             allowed_tools=["Skill"] if self._mode == "dev" else list(policy.allowed_tools),
-            disallowed_tools=[] if self._mode == "dev" else list(BLOCKED_TOOLS),
+            disallowed_tools=[
+                tool for tool in BLOCKED_TOOLS if tool not in policy.allowed_tools
+            ],
             permission_mode="dontAsk",
             system_prompt=system_prompt,
             resume=resume_session_id,
@@ -337,7 +387,9 @@ class QoderSdkAdapter:
         if not server_names:
             raise ValueError("Qoder MCP config must define at least one valid server")
         policy_cls = DevToolPolicy if self._mode == "dev" else ToolPolicy
-        self._policy = policy_cls(self._workspace_root, server_names)
+        self._policy = policy_cls(
+            self._workspace_root, server_names, knowledge_dir=self._knowledge_dir
+        )
 
     def _merge_user_mcp_servers(self, servers: dict[str, Any]) -> dict[str, Any]:
         """Merge user-level MCP servers (~/.qoder/mcp.json) for IDE parity.

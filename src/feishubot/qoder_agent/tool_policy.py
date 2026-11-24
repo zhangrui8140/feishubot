@@ -28,6 +28,15 @@ _DEV_READ_ROOTS = (
     Path.home() / ".agents" / "skills",
 )
 _PUSH_PROTECTED_BRANCHES = ("prod", "master", "main")
+# Read-only mode with a shared knowledge base: Bash is limited to single
+# read-only git commands (RUI-02 consistency checks); writes are limited to
+# .md documents inside the knowledge base (RUI-03/04).
+_READONLY_GIT_SUBCOMMANDS = ("log", "diff", "show", "status", "rev-parse", "ls-files")
+_READONLY_GIT_PATTERN = re.compile(
+    r"^git(?:\s+-C\s+(?P<cpath>\S+))?\s+"
+    r"(?P<sub>log|diff|show|status|rev-parse|ls-files)(?:\s+.*)?$"
+)
+_SHELL_METACHARACTERS = ";&|`$><\n\r"
 _DEV_FORBIDDEN_COMMAND_SUBSTRINGS = (
     "rm -rf",
     "rm -fr",
@@ -230,8 +239,14 @@ class ToolPolicy:
         self,
         workspace_root: Path,
         mcp_server_names: Iterable[str] = (DMS_SERVER,),
+        *,
+        knowledge_dir: Path | None = None,
     ) -> None:
         self._workspace_root = workspace_root
+        self._knowledge_dir = knowledge_dir.resolve() if knowledge_dir else None
+        self._extra_read_roots: tuple[Path, ...] = (
+            (self._knowledge_dir,) if self._knowledge_dir else ()
+        )
         names = tuple(mcp_server_names)
         self.mcp_server_names = tuple(
             name
@@ -252,6 +267,8 @@ class ToolPolicy:
                     mcp_tools += tuple(f"{prefix}{name}" for name in _OBSERVABILITY_FIELDS)
         self._mcp_tools = mcp_tools
         self.allowed_tools = LOCAL_READ_ONLY_TOOLS + mcp_tools + MCP_META_TOOLS
+        if self._knowledge_dir is not None:
+            self.allowed_tools += ("Write", "Edit", "Bash")
 
     @property
     def observability_enabled(self) -> bool:
@@ -260,6 +277,16 @@ class ToolPolicy:
     def denial_reason(self, tool_name: str, tool_input: Any) -> str | None:
         if tool_name in LOCAL_READ_ONLY_TOOLS:
             return self._local_tool_denial_reason(tool_name, tool_input)
+        if tool_name in ("Write", "Edit"):
+            if self._knowledge_dir is None:
+                return f"tool is not allowed in read-only mode: {tool_name}"
+            return self._knowledge_write_denial_reason(tool_name, tool_input)
+        if tool_name == "Bash":
+            if self._knowledge_dir is None:
+                return f"tool is not allowed in read-only mode: {tool_name}"
+            return _readonly_git_denial_reason(
+                tool_input, self._workspace_root, self._knowledge_dir
+            )
         if tool_name in MCP_META_TOOLS:
             return self._mcp_meta_tool_denial_reason(tool_name, tool_input)
         if tool_name not in self._mcp_tools:
@@ -315,7 +342,10 @@ class ToolPolicy:
                 continue
             values = value if isinstance(value, list) else [value]
             for raw_path in values:
-                if not isinstance(raw_path, str) or not self._is_inside_workspace(raw_path):
+                if not isinstance(raw_path, str) or not (
+                    self._is_inside_workspace(raw_path)
+                    or _is_in_dev_read_roots(raw_path, self._extra_read_roots)
+                ):
                     return f"path is outside the approved workspace: {raw_path}"
                 if _is_secret_file(raw_path):
                     return f"reading environment secret files is not allowed: {raw_path}"
@@ -323,7 +353,11 @@ class ToolPolicy:
         if tool_name == "Glob":
             pattern = tool_input.get("pattern")
             if isinstance(pattern, str) and _unsafe_glob_pattern(pattern):
-                return "glob pattern may not escape the approved workspace"
+                if not (
+                    PurePath(pattern).is_absolute()
+                    and _is_in_dev_read_roots(pattern, self._extra_read_roots)
+                ):
+                    return "glob pattern may not escape the approved workspace"
         return None
 
     def _is_inside_workspace(self, raw_path: str) -> bool:
@@ -338,6 +372,29 @@ class ToolPolicy:
             return False
         return True
 
+    def _knowledge_write_denial_reason(self, tool_name: str, tool_input: Any) -> str | None:
+        if not isinstance(tool_input, dict):
+            return "tool input must be an object"
+        raw_path = next(
+            (
+                tool_input[key]
+                for key in ("file_path", "path", "target_file", "target")
+                if isinstance(tool_input.get(key), str)
+            ),
+            None,
+        )
+        if raw_path is None or not raw_path.strip():
+            return f"{tool_name} requires a file path inside the knowledge base"
+        if not _path_in_root(raw_path, self._knowledge_dir):
+            return f"path is outside the knowledge base: {raw_path}"
+        if PurePath(raw_path).suffix.lower() != ".md":
+            return "only .md knowledge documents may be written in read-only mode"
+        if _is_git_internal_path(raw_path):
+            return "modifying .git internals is not allowed"
+        if _is_secret_file(raw_path):
+            return f"modifying environment secret files is not allowed: {raw_path}"
+        return None
+
 
 def _is_secret_file(raw_path: str) -> bool:
     name = PurePath(raw_path).name.lower()
@@ -349,18 +406,22 @@ def _unsafe_glob_pattern(pattern: str) -> bool:
     return path.is_absolute() or ".." in path.parts or pattern.startswith("~")
 
 
-def _is_in_dev_read_roots(raw_path: str) -> bool:
+def _is_in_dev_read_roots(raw_path: str, extra_roots: tuple[Path, ...] = ()) -> bool:
     if not raw_path.strip():
         return False
     candidate = Path(raw_path).expanduser()
     if not candidate.is_absolute():
+        return False
+    # The literal-path junction check below does not normalize '..', so reject
+    # traversal parts up front; resolve() alone would hide them.
+    if ".." in candidate.parts:
         return False
     try:
         resolved = candidate.resolve()
     except OSError:
         return False
     absolute = candidate.absolute()
-    for root in _DEV_READ_ROOTS:
+    for root in (*_DEV_READ_ROOTS, *extra_roots):
         if resolved == root or root in resolved.parents:
             return True
         # Skill dirs may be junctions (e.g. ~/.qoder/skills/<name> ->
@@ -369,6 +430,55 @@ def _is_in_dev_read_roots(raw_path: str) -> bool:
         if absolute == root or root in absolute.parents:
             return True
     return False
+
+
+def _path_in_root(raw_path: str, root: Path) -> bool:
+    """Relative paths resolve against the root; '~' and escapes are rejected."""
+    if not raw_path.strip() or raw_path.startswith("~"):
+        return False
+    candidate = Path(raw_path)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    try:
+        candidate.resolve().relative_to(root)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _readonly_git_denial_reason(
+    tool_input: Any, workspace_root: Path, knowledge_dir: Path
+) -> str | None:
+    if not isinstance(tool_input, dict):
+        return "tool input must be an object"
+    command = next(
+        (
+            tool_input[key]
+            for key in ("command", "cmd", "script")
+            if isinstance(tool_input.get(key), str)
+        ),
+        None,
+    )
+    if command is None or not command.strip():
+        return "Bash requires a command string"
+    if any(character in command for character in _SHELL_METACHARACTERS):
+        return "read-only mode allows a single git command without shell operators"
+    lowered = command.lower()
+    for flag in ("--output", "--no-index", "--exec-path"):
+        if flag in lowered:
+            return f"{flag} is not allowed in read-only mode"
+    if re.search(r"(^|\s)-c(\s|$)", command):
+        return "git -c configuration overrides are not allowed in read-only mode"
+    match = _READONLY_GIT_PATTERN.match(command.strip())
+    if match is None:
+        allowed = "/".join(_READONLY_GIT_SUBCOMMANDS)
+        return f"read-only mode only allows git {allowed}"
+    cpath = match.group("cpath")
+    if cpath and not (
+        _path_in_root(cpath, workspace_root) or _path_in_root(cpath, knowledge_dir)
+    ):
+        return f"git -C path is outside the approved workspace: {cpath}"
+    return None
 
 
 def _mysql_denial_reason(tool: str, tool_input: Any) -> str | None:
@@ -394,12 +504,14 @@ class DevToolPolicy(ToolPolicy):
         self,
         workspace_root: Path,
         mcp_server_names: Iterable[str] = (DMS_SERVER,),
+        *,
+        knowledge_dir: Path | None = None,
     ) -> None:
         names = tuple(mcp_server_names)
         base_names = tuple(
             name for name in names if name in (DMS_SERVER, *OBSERVABILITY_SERVERS)
         )
-        super().__init__(workspace_root, base_names)
+        super().__init__(workspace_root, base_names, knowledge_dir=knowledge_dir)
         self._extra_mcp_servers = tuple(
             name for name in names if name in (*MYSQL_SERVERS, CLAUDE_MEM_SERVER)
         )
@@ -449,14 +561,16 @@ class DevToolPolicy(ToolPolicy):
                 if _is_secret_file(raw_path):
                     return f"reading environment secret files is not allowed: {raw_path}"
                 if not (
-                    self._is_inside_workspace(raw_path) or _is_in_dev_read_roots(raw_path)
+                    self._is_inside_workspace(raw_path)
+                    or _is_in_dev_read_roots(raw_path, self._extra_read_roots)
                 ):
                     return f"path is outside the approved workspace: {raw_path}"
         if tool_name == "Glob":
             pattern = tool_input.get("pattern")
             if isinstance(pattern, str) and _unsafe_glob_pattern(pattern):
                 if not (
-                    PurePath(pattern).is_absolute() and _is_in_dev_read_roots(pattern)
+                    PurePath(pattern).is_absolute()
+                    and _is_in_dev_read_roots(pattern, self._extra_read_roots)
                 ):
                     return "glob pattern may not escape the approved workspace"
         return None
@@ -474,8 +588,14 @@ class DevToolPolicy(ToolPolicy):
         )
         if raw_path is None or not raw_path.strip():
             return f"{tool_name} requires a file path inside the dev workspace"
-        if not self._is_inside_workspace(raw_path):
+        in_knowledge = self._knowledge_dir is not None and _path_in_root(
+            raw_path, self._knowledge_dir
+        )
+        if not self._is_inside_workspace(raw_path) and not in_knowledge:
             return f"path is outside the dev workspace: {raw_path}"
+        if in_knowledge and not self._is_inside_workspace(raw_path):
+            if PurePath(raw_path).suffix.lower() != ".md":
+                return "only .md knowledge documents may be written outside the dev workspace"
         if _is_git_internal_path(raw_path):
             return "modifying .git internals is not allowed in dev mode"
         if _is_secret_file(raw_path):

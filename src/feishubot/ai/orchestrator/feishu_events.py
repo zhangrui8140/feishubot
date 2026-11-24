@@ -146,6 +146,10 @@ async def _initialize_worker_runtime() -> None:
         )
         domain_value = settings.qoder_domain_knowledge_dir.strip()
         domain_dir = Path(domain_value).expanduser().resolve() if domain_value else None
+        knowledge_value = settings.qoder_knowledge_dir.strip()
+        knowledge_dir = (
+            Path(knowledge_value).expanduser().resolve() if knowledge_value else None
+        )
         config = QoderServiceConfig(
             workspace_root=Path(settings.qoder_workspace_root).expanduser().resolve(),
             model=settings.qoder_model,
@@ -161,6 +165,7 @@ async def _initialize_worker_runtime() -> None:
             session_idle_ttl_seconds=settings.qoder_session_idle_ttl_seconds,
             dedup_ttl_seconds=settings.qoder_dedup_ttl_seconds,
             domain_knowledge_dir=domain_dir,
+            knowledge_dir=knowledge_dir,
             max_buffer_size_bytes=settings.qoder_max_buffer_size_bytes,
             mode=settings.qoder_agent_mode.strip().lower(),
         )
