@@ -15,6 +15,10 @@ from lark_oapi.api.im.v1 import (
     CreateMessageRequest,
     CreateMessageRequestBody,
     GetMessageResourceRequest,
+    PatchMessageRequest,
+    PatchMessageRequestBody,
+    ReplyMessageRequest,
+    ReplyMessageRequestBody,
 )
 
 from feishubot.config import settings
@@ -60,6 +64,111 @@ class FeishuClient:
             "msg": response.msg,
             "data": {"message_id": message_id},
         }
+
+    async def reply_text_message(self, message_id: str, text: str) -> dict[str, Any]:
+        request = (
+            ReplyMessageRequest.builder()
+            .message_id(message_id)
+            .request_body(
+                ReplyMessageRequestBody.builder()
+                .msg_type("text")
+                .content(json.dumps({"text": text}, ensure_ascii=False))
+                .uuid(str(uuid4()))
+                .build()
+            )
+            .build()
+        )
+
+        response = await self._client.im.v1.message.areply(request)
+        if not response.success():
+            raise RuntimeError(
+                "failed to reply feishu message: "
+                f"code={response.code}, msg={response.msg}, log_id={response.get_log_id()}"
+            )
+
+        reply_id = response.data.message_id if response.data else None
+        return {"code": response.code, "msg": response.msg, "data": {"message_id": reply_id}}
+
+    async def send_interactive_message(
+        self,
+        receive_id: str,
+        card: dict[str, Any],
+        receive_id_type: str = "open_id",
+    ) -> dict[str, Any]:
+        request = (
+            CreateMessageRequest.builder()
+            .receive_id_type(receive_id_type)
+            .request_body(
+                CreateMessageRequestBody.builder()
+                .receive_id(receive_id)
+                .msg_type("interactive")
+                .content(json.dumps(card, ensure_ascii=False))
+                .uuid(str(uuid4()))
+                .build()
+            )
+            .build()
+        )
+        response = await self._client.im.v1.message.acreate(request)
+        if not response.success():
+            raise RuntimeError(
+                "failed to send feishu interactive message: "
+                f"code={response.code}, msg={response.msg}, log_id={response.get_log_id()}"
+            )
+        message_id = response.data.message_id if response.data else None
+        return {
+            "code": response.code,
+            "msg": response.msg,
+            "data": {"message_id": message_id},
+        }
+
+    async def reply_interactive_message(
+        self, message_id: str, card: dict[str, Any]
+    ) -> dict[str, Any]:
+        request = (
+            ReplyMessageRequest.builder()
+            .message_id(message_id)
+            .request_body(
+                ReplyMessageRequestBody.builder()
+                .msg_type("interactive")
+                .content(json.dumps(card, ensure_ascii=False))
+                .uuid(str(uuid4()))
+                .build()
+            )
+            .build()
+        )
+        response = await self._client.im.v1.message.areply(request)
+        if not response.success():
+            raise RuntimeError(
+                "failed to reply feishu interactive message: "
+                f"code={response.code}, msg={response.msg}, log_id={response.get_log_id()}"
+            )
+        reply_id = response.data.message_id if response.data else None
+        return {
+            "code": response.code,
+            "msg": response.msg,
+            "data": {"message_id": reply_id},
+        }
+
+    async def patch_interactive_message(
+        self, message_id: str, card: dict[str, Any]
+    ) -> dict[str, Any]:
+        request = (
+            PatchMessageRequest.builder()
+            .message_id(message_id)
+            .request_body(
+                PatchMessageRequestBody.builder()
+                .content(json.dumps(card, ensure_ascii=False))
+                .build()
+            )
+            .build()
+        )
+        response = await self._client.im.v1.message.apatch(request)
+        if not response.success():
+            raise RuntimeError(
+                "failed to patch feishu interactive message: "
+                f"code={response.code}, msg={response.msg}, log_id={response.get_log_id()}"
+            )
+        return {"code": response.code, "msg": response.msg, "data": {}}
 
     async def send_image_message(
         self, receive_id: str, image_file: IOBase, receive_id_type: str = "open_id"
@@ -158,7 +267,11 @@ class FeishuClient:
                 f"log_id={response.get_log_id()}, message_id={message_id}, file_key={file_key}"
             )
 
-        resource_bytes = response.file.read()
+        try:
+            resource_bytes = response.file.read()
+        finally:
+            response.file.close()
+
         if not resource_bytes:
             raise RuntimeError(
                 f"failed to download feishu {resource_type} resource: empty file content, "
@@ -238,8 +351,15 @@ class FeishuClient:
         evict_oldest_images(save_dir, settings.image_local_max_count)
 
         if filename:
-            save_path = save_dir / filename
+            safe_filename = Path(filename).name
+            if not safe_filename:
+                raise ValueError("filename must be a valid file name")
+            save_path = (save_dir / safe_filename).resolve()
         else:
-            save_path = save_dir / f"{message_id}_{file_key}{ext}"
+            save_path = (save_dir / f"{message_id}_{file_key}{ext}").resolve()
+
+        if not save_path.is_relative_to(save_dir.resolve()):
+            raise ValueError(f"target path escapes image directory: {filename}")
+
         save_path.write_bytes(image_bytes)
         return str(save_path)

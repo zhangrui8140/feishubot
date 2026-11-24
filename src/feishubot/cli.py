@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import getpass
 import importlib.resources
 import json
+import os
 import tomllib
 from collections.abc import Sequence
 from pathlib import Path
@@ -15,6 +17,7 @@ from feishubot.ai.prompts import build_system_prompt
 from feishubot.ai.providers import create_active_provider
 from feishubot.ai.tools import ToolRuntime
 from feishubot.config import settings
+from feishubot.env_config import load_env_values, write_env_values
 
 LLM_PRESETS: dict[str, dict[str, str]] = {
     "qwen": {
@@ -92,7 +95,7 @@ def _build_parser() -> argparse.ArgumentParser:
     gateway_parser = subparsers.add_parser("gateway", help="Start HTTP gateway service")
     gateway_parser.add_argument(
         "--host",
-        default="0.0.0.0",  # noqa: S104 - intentional default for dev/container access
+        default="127.0.0.1",
         help="Gateway bind host",
     )
     gateway_parser.add_argument("--port", type=int, default=8000, help="Gateway bind port")
@@ -181,7 +184,10 @@ def _prompt_text(label: str, default: str = "") -> str:
 def _prompt_secret(label: str, default: str = "") -> str:
     masked = "***" if default else ""
     suffix = f" [{masked}]" if masked else ""
-    value = input(f"{label}{suffix}: ").strip()
+    try:
+        value = getpass.getpass(f"{label}{suffix}: ").strip()
+    except (OSError, ValueError):
+        value = input(f"{label}{suffix}: ").strip()
     if value:
         return value
     return default
@@ -212,86 +218,6 @@ def _prompt_yes_no(label: str, default: bool = True) -> bool:
         if value in {"n", "no"}:
             return False
         print(f"Invalid choice: {value}")
-
-
-def _load_env_file(path: Path) -> dict[str, str]:
-    if not path.exists():
-        return {}
-
-    values: dict[str, str] = {}
-    lines = path.read_text(encoding="utf-8").splitlines()
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            i += 1
-            continue
-
-        key, value = stripped.split("=", 1)
-        key = key.strip()
-        value = value.strip()
-
-        if value.startswith(('"', "'")):
-            quote = value[0]
-            if not (len(value) >= 2 and value.endswith(quote)):
-                collected = [value]
-                j = i + 1
-                while j < len(lines):
-                    collected.append(lines[j])
-                    if lines[j].rstrip().endswith(quote):
-                        break
-                    j += 1
-                value = "\n".join(collected)
-                i = j
-
-        if value.startswith('"') and value.endswith('"') and len(value) >= 2:
-            value = value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
-        elif value.startswith("'") and value.endswith("'") and len(value) >= 2:
-            value = value[1:-1]
-
-        values[key] = value
-        i += 1
-
-    return values
-
-
-def _format_env_value(value: str) -> str:
-    needs_quote = any(ch.isspace() for ch in value) or any(ch in value for ch in ["#", '"', "'"])
-    if not needs_quote:
-        return value
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{escaped}"'
-
-
-def _format_env_assignment(key: str, value: str) -> str:
-    return f"{key}={_format_env_value(value)}"
-
-
-def _write_env_file(path: Path, values: dict[str, str]) -> None:
-    keys_in_order = [
-        "APP_ENV",
-        "LOG_LEVEL",
-        "DEFAULT_CHANNEL",
-        "FEISHU_APP_ID",
-        "FEISHU_APP_SECRET",
-        "FEISHU_VERIFICATION_TOKEN",
-        "FEISHU_ENCRYPT_KEY",
-        "GATEWAY_INTERNAL_API_KEY",
-        "LLM_PROVIDER",
-        "LLM_ACTIVE_MODEL",
-        "LLM_BASE_URL",
-        "LLM_API_KEY",
-        "LLM_MODEL",
-        "LLM_CHAT_PATH",
-        "LLM_TIMEOUT_SECONDS",
-        "LLM_SYSTEM_PROMPT",
-        "LLM_MODELS_CONFIG_PATH",
-        "AI_TOOLS_CONFIG_PATH",
-    ]
-
-    lines = [_format_env_assignment(key, values.get(key, "")) for key in keys_in_order]
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _resolve_models_config_path(config_value: str, env_path: Path) -> Path:
@@ -401,7 +327,7 @@ def _write_models_config(path: Path, default_model: str, models: dict[str, dict[
 
 def _run_setup(args: argparse.Namespace) -> None:
     env_path = Path(args.env_file).expanduser().resolve()
-    current = _load_env_file(env_path)
+    current = load_env_values(env_path)
 
     print("FeishuBot quick setup")
     print(f"Target env file: {env_path}")
@@ -520,7 +446,7 @@ def _run_setup(args: argparse.Namespace) -> None:
     _ensure_tools_config(tools_config_path)
 
     env_path.parent.mkdir(parents=True, exist_ok=True)
-    _write_env_file(env_path, values)
+    write_env_values(env_path, values)
 
     print("\nSetup complete.")
     if not values["FEISHU_APP_ID"] or not values["FEISHU_APP_SECRET"]:
@@ -535,7 +461,7 @@ def _run_setup(args: argparse.Namespace) -> None:
 
 def _run_model_switch(args: argparse.Namespace) -> None:
     env_path = Path(args.env_file).expanduser().resolve()
-    current = _load_env_file(env_path)
+    current = load_env_values(env_path)
     models_config_value = current.get("LLM_MODELS_CONFIG_PATH", "models.toml")
     models_config_path = _resolve_models_config_path(models_config_value, env_path)
     default_model, models = _load_models_config(models_config_path)
@@ -587,7 +513,7 @@ def _run_model_switch(args: argparse.Namespace) -> None:
     current["LLM_MODELS_CONFIG_PATH"] = models_config_value
     _write_models_config(models_config_path, selected_name, models)
 
-    _write_env_file(env_path, current)
+    write_env_values(env_path, current)
 
     print(f"Active model switched to: {selected_name}")
     print("Restart 'feishubot chat' or gateway to apply the new model.")
@@ -633,40 +559,64 @@ async def _chat_loop(user_id: str, system_prompt: str | None) -> None:
         system_prompt=build_system_prompt(active.system_prompt, system_prompt, include_core=False),
     )
 
-    print("FeishuBot terminal chat is ready.")
+    print("=" * 60)
+    print("🤖 FeishuBot 终端交互助手已启动")
     if active.provider == "echo":
-        print("Using model: echo")
+        print("  当前模型: echo (冒烟回显测试模式)")
     else:
-        print(f"Using model: {active.model}")
-    print("Tool shortcuts: /terminal <command>, /tool <name> <payload>")
-    print("Type your message and press Enter. Use /exit to quit.")
+        print(f"  当前模型: {active.model} (Provider: {active.provider})")
+    print("  快捷指令: /help (帮助手册), /clear (清屏), /model (模型信息), /exit (退出)")
+    print("=" * 60)
 
     while True:
         try:
-            user_input = input("you> ").strip()
+            user_input = (await asyncio.to_thread(input, "you> ")).strip()
         except (EOFError, KeyboardInterrupt):
-            print("\nbye")
+            print("\n👋 已退出会话，再见！")
             break
 
         if not user_input:
             continue
 
-        if user_input.lower() in {"/exit", "exit", "quit"}:
-            print("bye")
+        lowered = user_input.lower()
+        if lowered in {"/exit", "exit", "quit", ":q"}:
+            print("👋 已退出会话，再见！")
             break
+
+        if lowered in {"/help", "help", "/h", "帮助"}:
+            print("\n💡 终端交互快捷指令说明:")
+            print("  /help                     查看本帮助指南")
+            print("  /clear                    清除当前终端屏幕")
+            print("  /model                    查看当前生效的模型与端点详情")
+            print("  /terminal <command>       直接执行本地 cmd/shell 命令 (如 /terminal dir)")
+            print("  /tool <name> <payload>    直接调用指定工具 (如 /tool calculator 1+2)")
+            print("  /exit, quit               安全退出终端会话\n")
+            continue
+
+        if lowered in {"/clear", "clear", "cls"}:
+            os.system("cls" if os.name == "nt" else "clear")
+            print(f"🤖 FeishuBot [Model: {active.model}] (输入 /help 查看命令)")
+            continue
+
+        if lowered in {"/model", "model"}:
+            print(f"\n⚙️ 当前模型配置: {active.name or active.model}")
+            print(f"  Provider: {active.provider}")
+            print(f"  Base URL: {active.base_url or 'N/A'}")
+            print(f"  Timeout:  {active.timeout_seconds}s\n")
+            continue
 
         try:
             direct_tool_call = _parse_direct_tool_command(user_input)
             if direct_tool_call is not None:
                 tool_name, arguments = direct_tool_call
                 tool_result = await tool_runtime.execute(tool_name, arguments)
-                print(f"bot> {tool_runtime.format_result(tool_name, tool_result)}")
+                print(f"bot(tool:{tool_name})> {tool_runtime.format_result(tool_name, tool_result)}")
                 continue
 
             final_reply = await agent_loop.run(user_input=user_input, user_id=user_id)
             print(f"bot> {final_reply}")
         except Exception as exc:  # noqa: BLE001
-            print(f"bot(error)> {exc}")
+            print(f"bot(error)> 处理出错: {exc}")
             continue
 
 
@@ -701,6 +651,8 @@ def _run_events(args: argparse.Namespace) -> None:
     from feishubot.ai.orchestrator.feishu_events import (
         build_event_dispatcher,
         start_event_worker_loop,
+        start_handoff,
+        stop_event_worker_loop,
     )
 
     if not settings.feishu_app_id or not settings.feishu_app_secret:
@@ -717,20 +669,28 @@ def _run_events(args: argparse.Namespace) -> None:
     log_level = log_level_map[args.log_level]
 
     print("Starting Feishu long-connection event receiver.")
-    print("Fallback policy: webhook gateway will start if long connection is unavailable.")
+    if args.no_fallback_webhook:
+        print("Fallback policy: disabled.")
+    else:
+        print("Fallback policy: webhook gateway will start if long connection is unavailable.")
     print("Press Ctrl+C to stop.")
 
     start_event_worker_loop()
+    # Without the webhook fallback the long connection must heal itself after network drops.
     client = lark.ws.Client(
         settings.feishu_app_id,
         settings.feishu_app_secret,
         log_level=log_level,
         event_handler=build_event_dispatcher(log_level),
-        auto_reconnect=False,
+        auto_reconnect=args.no_fallback_webhook,
     )
+    handed_over = start_handoff(client)
     try:
         client.start()
     except Exception as exc:  # noqa: BLE001
+        if handed_over.is_set():
+            print("Handed over to the newer FeishuBot version; exiting.")
+            return
         fallback_enabled = not args.no_fallback_webhook
         if not fallback_enabled:
             raise
@@ -738,6 +698,8 @@ def _run_events(args: argparse.Namespace) -> None:
         print(f"Long connection unavailable: {exc}")
         print("Falling back to webhook gateway mode.")
         _run_webhook_gateway(args.fallback_host, args.fallback_port, args.fallback_reload)
+    finally:
+        stop_event_worker_loop()
 
 
 def main(argv: Sequence[str] | None = None) -> None:

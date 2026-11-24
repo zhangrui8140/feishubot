@@ -9,6 +9,18 @@ from pydantic import BaseModel, Field
 
 from feishubot.ai.tools.base import Tool
 
+_shared_http_client: httpx.AsyncClient | None = None
+
+
+def _get_search_client(timeout: float) -> httpx.AsyncClient:
+    global _shared_http_client
+    if _shared_http_client is None or _shared_http_client.is_closed:
+        _shared_http_client = httpx.AsyncClient(
+            timeout=timeout,
+            limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
+        )
+    return _shared_http_client
+
 
 class WebSearchArguments(BaseModel):
     query: str = Field(min_length=1, max_length=200)
@@ -134,51 +146,52 @@ class WebSearchTool(Tool):
             "skip_disambig": "1",
         }
 
-        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
-            try:
-                ddg_response = await client.get(
-                    "https://api.duckduckgo.com/", params=ddg_params, headers=headers
-                )
-                ddg_response.raise_for_status()
-                ddg_payload = ddg_response.json()
-                if not isinstance(ddg_payload, dict):
-                    raise RuntimeError("invalid duckduckgo response")
+        client = _get_search_client(timeout_seconds)
 
-                ddg_results = self._extract_results(ddg_payload, max_results=max_results)
-                if ddg_results:
-                    return {
-                        "provider": "duckduckgo_instant",
-                        "query": query,
-                        "result_count": len(ddg_results),
-                        "results": ddg_results,
-                    }
-                errors.append("duckduckgo returned 0 results")
-            except (httpx.HTTPError, RuntimeError, ValueError) as exc:
-                errors.append(f"duckduckgo failed: {exc}")
+        try:
+            ddg_response = await client.get(
+                "https://api.duckduckgo.com/", params=ddg_params, headers=headers
+            )
+            ddg_response.raise_for_status()
+            ddg_payload = ddg_response.json()
+            if not isinstance(ddg_payload, dict):
+                raise RuntimeError("invalid duckduckgo response")
 
-            try:
-                bing_response = await client.get(
-                    "https://cn.bing.com/search",
-                    params={"q": query, "format": "rss"},
-                    headers=headers,
-                )
-                bing_response.raise_for_status()
-                bing_results = self._extract_bing_rss_results(
-                    bing_response.text,
-                    max_results=max_results,
-                )
-                if bing_results:
-                    return {
-                        "provider": "bing_rss",
-                        "query": query,
-                        "result_count": len(bing_results),
-                        "results": bing_results,
-                        "fallback_used": True,
-                        "notes": errors,
-                    }
-                errors.append("bing_rss returned 0 results")
-            except httpx.HTTPError as exc:
-                errors.append(f"bing_rss failed: {exc}")
+            ddg_results = self._extract_results(ddg_payload, max_results=max_results)
+            if ddg_results:
+                return {
+                    "provider": "duckduckgo_instant",
+                    "query": query,
+                    "result_count": len(ddg_results),
+                    "results": ddg_results,
+                }
+            errors.append("duckduckgo returned 0 results")
+        except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+            errors.append(f"duckduckgo failed: {exc}")
+
+        try:
+            bing_response = await client.get(
+                "https://cn.bing.com/search",
+                params={"q": query, "format": "rss"},
+                headers=headers,
+            )
+            bing_response.raise_for_status()
+            bing_results = self._extract_bing_rss_results(
+                bing_response.text,
+                max_results=max_results,
+            )
+            if bing_results:
+                return {
+                    "provider": "bing_rss",
+                    "query": query,
+                    "result_count": len(bing_results),
+                    "results": bing_results,
+                    "fallback_used": True,
+                    "notes": errors,
+                }
+            errors.append("bing_rss returned 0 results")
+        except httpx.HTTPError as exc:
+            errors.append(f"bing_rss failed: {exc}")
 
         return {
             "provider": "unavailable",

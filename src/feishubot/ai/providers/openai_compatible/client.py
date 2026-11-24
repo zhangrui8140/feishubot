@@ -7,6 +7,12 @@ import httpx
 from feishubot.ai.core.schemas import ChatMessage, ModelResponse
 from feishubot.ai.providers.base import ModelProvider
 
+_CONNECTION_LIMITS = httpx.Limits(
+    max_keepalive_connections=20,
+    max_connections=50,
+    keepalive_expiry=60.0,
+)
+
 
 class OpenAICompatibleProvider(ModelProvider):
     def __init__(
@@ -30,6 +36,10 @@ class OpenAICompatibleProvider(ModelProvider):
         self._model = model
         self._chat_path = chat_path if chat_path.startswith("/") else f"/{chat_path}"
         self._timeout_seconds = timeout_seconds
+        self._client = httpx.AsyncClient(
+            timeout=timeout_seconds,
+            limits=_CONNECTION_LIMITS,
+        )
 
     async def chat(
         self, messages: list[ChatMessage], *, user_id: str | None = None
@@ -48,13 +58,15 @@ class OpenAICompatibleProvider(ModelProvider):
         if user_id:
             payload["user"] = user_id
 
-        async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
-            response = await client.post(url, headers=headers, json=payload)
-            response.raise_for_status()
-            data = response.json()
+        response = await self._client.post(url, headers=headers, json=payload)
+        response.raise_for_status()
+        data = response.json()
 
         text = self._extract_text(data)
         return ModelResponse(text=text)
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
 
     @staticmethod
     def _extract_text(data: dict[str, Any]) -> str:

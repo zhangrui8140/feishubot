@@ -87,9 +87,15 @@ class SaveImageTool(Tool):
         evict_oldest_images(save_dir, settings.image_local_max_count)
 
         if filename:
-            save_path = save_dir / filename
+            safe_filename = Path(filename).name
+            if not safe_filename:
+                raise ValueError("filename must be a valid file name")
+            save_path = (save_dir / safe_filename).resolve()
         else:
-            save_path = save_dir / f"{uuid.uuid4().hex}{ext}"
+            save_path = (save_dir / f"{uuid.uuid4().hex}{ext}").resolve()
+
+        if not save_path.is_relative_to(save_dir.resolve()):
+            raise ValueError(f"target path escapes image directory: {filename}")
 
         save_path.write_bytes(image_bytes)
 

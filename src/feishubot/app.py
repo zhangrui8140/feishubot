@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import secrets
 from contextlib import asynccontextmanager
 from typing import Any
 from urllib.parse import parse_qs
@@ -10,6 +11,7 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from lark_oapi.core.model import RawRequest
 from pydantic import BaseModel, Field
 
+from feishubot.admin import install_admin
 from feishubot.ai.core.errors import ProviderNotFoundError
 from feishubot.ai.orchestrator import AgentLoop
 from feishubot.ai.orchestrator.feishu_events import build_event_dispatcher
@@ -21,6 +23,16 @@ from feishubot.config import settings
 
 logger = logging.getLogger(__name__)
 
+_tool_runtime: ToolRuntime | None = None
+_model_provider: ModelProvider | None = None
+
+
+def _get_tool_runtime() -> ToolRuntime:
+    global _tool_runtime
+    if _tool_runtime is None:
+        _tool_runtime = ToolRuntime()
+    return _tool_runtime
+
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):  # noqa: ARG001
@@ -28,7 +40,9 @@ async def _lifespan(app: FastAPI):  # noqa: ARG001
 
     try:
         await init_mcp_tools()
-    except Exception:  # noqa: BLE001
+    except BaseException as exc:
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
         logger.exception("Failed to initialize MCP client on startup")
     yield
     from feishubot.ai.mcp import get_mcp_client
@@ -36,11 +50,20 @@ async def _lifespan(app: FastAPI):  # noqa: ARG001
     try:
         client = get_mcp_client()
         await client.disconnect()
-    except Exception:  # noqa: BLE001
+    except BaseException as exc:
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
         logger.exception("Failed to disconnect MCP client on shutdown")
+
+    if _model_provider is not None and hasattr(_model_provider, 'aclose'):
+        try:
+            await _model_provider.aclose()
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to close model provider HTTP client")
 
 
 app = FastAPI(title="FeishuBot", version="0.1.0", lifespan=_lifespan)
+install_admin(app)
 
 channel_client: Channel | None = None
 feishu_event_dispatcher = build_event_dispatcher()
@@ -182,7 +205,7 @@ def _validate_internal_api_key(request: Request) -> None:
         )
 
     provided_api_key = request.headers.get("x-api-key", "").strip()
-    if provided_api_key != expected_api_key:
+    if not secrets.compare_digest(provided_api_key, expected_api_key):
         raise HTTPException(status_code=401, detail="invalid internal api key")
 
 
@@ -193,7 +216,7 @@ async def _run_agent(
     model_provider = get_model_provider()
     agent_loop = AgentLoop(
         model_provider=model_provider,
-        tool_runtime=ToolRuntime(),
+        tool_runtime=_get_tool_runtime(),
         system_prompt=build_system_prompt(active.system_prompt, system_prompt, include_core=False),
     )
     reply = await agent_loop.run(user_input=message, user_id=user_id)
@@ -206,9 +229,10 @@ async def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.api_route("/api/chat", methods=["GET", "POST"], response_model=ChatResponse)
-@app.api_route("/api/llm/chat", methods=["GET", "POST"], response_model=ChatResponse)
+@app.post("/api/chat", response_model=ChatResponse)
+@app.post("/api/llm/chat", response_model=ChatResponse)
 async def chat_with_llm(request: Request) -> ChatResponse:
+    _validate_internal_api_key(request)
     payload = await _extract_chat_request(request)
     return await _run_agent(payload.message, payload.user_id, payload.system_prompt)
 
@@ -271,7 +295,9 @@ async def handle_feishu_events(request: Request) -> Response | dict[str, str]:
         if payload.get("type") == "url_verification":
             return {"challenge": payload.get("challenge")}
 
-        feishu_event_dispatcher.do_without_validation(body)
+        dispatch_result = feishu_event_dispatcher.do_without_validation(body)
+        if dispatch_result is not None:
+            return dispatch_result
         return {"msg": "success"}
 
     raw_request = RawRequest()

@@ -6,25 +6,22 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from feishubot.ai.prompts import build_system_prompt
 
 
-def _resolve_env_file() -> str:
+def resolve_env_file() -> Path:
     configured_env_file = os.getenv("FEISHUBOT_ENV_FILE", "").strip()
     if configured_env_file:
-        return str(Path(configured_env_file).expanduser())
+        return Path(configured_env_file).expanduser()
 
     cwd_env_file = Path.cwd() / ".env"
     if cwd_env_file.exists():
-        return str(cwd_env_file)
+        return cwd_env_file
 
-    home_env_file = Path.home() / ".feishubot" / ".env"
-    if home_env_file.exists():
-        return str(home_env_file)
-
-    return str(home_env_file)
+    return Path.home() / ".feishubot" / ".env"
 
 
 @dataclass(frozen=True)
@@ -41,7 +38,7 @@ class ActiveLLMConfig:
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=_resolve_env_file(), env_file_encoding="utf-8", extra="ignore"
+        env_file=resolve_env_file(), env_file_encoding="utf-8", extra="ignore"
     )
 
     app_env: str = "dev"
@@ -68,6 +65,29 @@ class Settings(BaseSettings):
     image_local_dir: str = ""
     image_local_max_count: int = 30
     mcp_servers_config_path: str = ""
+
+    feishu_agent_backend: str = "legacy"
+    qoder_personal_access_token: SecretStr = SecretStr("")
+    qoder_workspace_root: str = r"D:\workspace\projects\qoderwork\prod"
+    qoder_model: str = "auto"
+    # "readonly" (prod analysis) or "dev" (dev worktree development tasks).
+    qoder_agent_mode: str = "readonly"
+    qoder_session_store_dir: str = str(Path.home() / ".feishubot" / "qoder-sessions")
+    qoder_run_timeout_seconds: float = 600.0
+    qoder_cancel_grace_seconds: float = 5.0
+    qoder_shutdown_grace_seconds: float = 30.0
+    qoder_max_concurrent_runs: int = 2
+    qoder_max_live_sessions: int = 4
+    qoder_max_queued_per_session: int = 3
+    qoder_session_idle_ttl_seconds: float = 1800.0
+    qoder_dedup_ttl_seconds: float = 86400.0
+    qoder_max_buffer_size_bytes: int = 32 * 1024 * 1024
+    # Empty disables recording and reuse of domain module knowledge.
+    qoder_domain_knowledge_dir: str = str(Path.home() / ".feishubot" / "domain-knowledge")
+    # Empty disables handing in-flight analyses over to a newly started version.
+    qoder_handoff_dir: str = str(Path.home() / ".feishubot" / "handoff")
+    qoder_diagnosis_cards_enabled: bool = True
+    qoder_diagnosis_store_dir: str = str(Path.home() / ".feishubot" / "diagnoses")
 
     def _load_models_from_toml(self, config_path: Path) -> tuple[str, dict[str, dict[str, Any]]]:
         if not config_path.exists():
@@ -96,11 +116,22 @@ class Settings(BaseSettings):
         return default_model, models
 
     def _resolve_from_model_map(self) -> ActiveLLMConfig | None:
+        global _models_cache
         models_config_path = self.llm_models_config_path.strip()
         if not models_config_path:
             return None
 
         resolved_path = Path(models_config_path).expanduser().resolve()
+        try:
+            current_mtime = resolved_path.stat().st_mtime
+        except OSError:
+            current_mtime = 0.0
+
+        if _models_cache is not None:
+            cached_mtime, cached_config = _models_cache
+            if cached_mtime == current_mtime and current_mtime > 0:
+                return cached_config
+
         default_model, models = self._load_models_from_toml(resolved_path)
 
         active_name = self.llm_active_model.strip() or default_model or next(iter(models))
@@ -125,7 +156,7 @@ class Settings(BaseSettings):
                 f"timeout_seconds for active model '{active_name}' must be a number"
             ) from exc
 
-        return ActiveLLMConfig(
+        result = ActiveLLMConfig(
             name=active_name,
             provider=provider,
             base_url=base_url,
@@ -135,6 +166,8 @@ class Settings(BaseSettings):
             timeout_seconds=timeout_seconds,
             system_prompt=system_prompt,
         )
+        _models_cache = (current_mtime, result)
+        return result
 
     def active_llm_config(self) -> ActiveLLMConfig:
         model_map_config = self._resolve_from_model_map()
@@ -152,5 +185,7 @@ class Settings(BaseSettings):
             system_prompt=build_system_prompt(self.llm_system_prompt),
         )
 
+
+_models_cache: tuple[float, ActiveLLMConfig] | None = None
 
 settings = Settings()

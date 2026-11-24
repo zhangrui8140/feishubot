@@ -22,6 +22,31 @@ class FeishuChannel(Channel):
             receive_id_type=receive_id_type,
         )
 
+    async def reply_text_message(self, message_id: str, text: str) -> dict[str, Any]:
+        return await self._client.reply_text_message(message_id=message_id, text=text)
+
+    async def send_interactive_message(
+        self,
+        receive_id: str,
+        card: dict[str, Any],
+        receive_id_type: str = "open_id",
+    ) -> dict[str, Any]:
+        return await self._client.send_interactive_message(
+            receive_id=receive_id,
+            card=card,
+            receive_id_type=receive_id_type,
+        )
+
+    async def reply_interactive_message(
+        self, message_id: str, card: dict[str, Any]
+    ) -> dict[str, Any]:
+        return await self._client.reply_interactive_message(message_id=message_id, card=card)
+
+    async def patch_interactive_message(
+        self, message_id: str, card: dict[str, Any]
+    ) -> dict[str, Any]:
+        return await self._client.patch_interactive_message(message_id=message_id, card=card)
+
     async def send_image_message(
         self, receive_id: str, image_file: IOBase, receive_id_type: str = "open_id"
     ) -> dict[str, Any]:

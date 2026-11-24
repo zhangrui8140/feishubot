@@ -27,15 +27,34 @@ class McpServerConfig:
     headers: dict[str, str] | None = None
 
 
+# The shared mcp.json uses the Qoder-SDK `type` key, where "http" means
+# streamable-HTTP and "sse" means SSE. client.py's dispatch vocabulary differs
+# (it treats a literal "http" transport as SSE), so normalize both `transport`
+# and `type` values onto stdio / sse / streamable_http.
+_TRANSPORT_ALIASES = {
+    "stdio": "stdio",
+    "sse": "sse",
+    "http": "streamable_http",
+    "streamablehttp": "streamable_http",
+    "streamable_http": "streamable_http",
+}
+
+
 def _load_server_configs(config_path: Path) -> dict[str, McpServerConfig]:
     if not config_path.exists():
         raise ValueError(f"MCP servers config not found: {config_path}")
 
-    raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
-    if not isinstance(raw, dict):
-        raise ValueError("MCP servers config must be a TOML table")
+    content = config_path.read_text(encoding="utf-8")
+    if config_path.suffix.lower() == ".json" or content.strip().startswith("{"):
+        import json
+        raw = json.loads(content)
+    else:
+        raw = tomllib.loads(content)
 
-    servers_raw = raw.get("mcp_servers")
+    if not isinstance(raw, dict):
+        raise ValueError("MCP servers config must be a JSON object or TOML table")
+
+    servers_raw = raw.get("mcp_servers") or raw.get("mcpServers")
     if not isinstance(servers_raw, dict) or not servers_raw:
         return {}
 
@@ -46,7 +65,10 @@ def _load_server_configs(config_path: Path) -> dict[str, McpServerConfig]:
         if not isinstance(server_config, dict):
             raise ValueError(f"mcp server '{server_name}' must be a TOML table")
 
-        transport = str(server_config.get("transport", "stdio")).strip().lower()
+        transport_default = "streamable_http" if "url" in server_config else "stdio"
+        raw_transport = server_config.get("transport") or server_config.get("type")
+        transport = str(raw_transport).strip().lower() if raw_transport else transport_default
+        transport = _TRANSPORT_ALIASES.get(transport, transport)
         name = server_name.strip()
 
         if transport == "stdio":
@@ -134,7 +156,9 @@ class MCPClient:
                     await self._connect_streamable_http(server_config)
                 elif server_config.transport in {"sse", "http"}:
                     await self._connect_sse(server_config)
-            except Exception:  # noqa: BLE001
+            except BaseException as exc:
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                    raise
                 logger.exception(
                     f"Failed to connect to MCP server '{server_name}' "
                     f"(transport={server_config.transport}, "
