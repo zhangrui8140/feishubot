@@ -1,6 +1,7 @@
 @echo off
 setlocal
 cd /d "%~dp0"
+title 张锐开发助手
 
 set "PYTHON=%CD%\.venv\Scripts\python.exe"
 set "FEISHUBOT_ENV_FILE=%CD%\.env.dev"
@@ -18,7 +19,7 @@ if not exist "%FEISHUBOT_ENV_FILE%" (
     exit /b 1
 )
 
-echo [START] FeishuBot dev-task events (separate app, dev worktree tasks)
+echo [START] 张锐开发助手（dev 全能力，独立应用）
 echo Press Ctrl+C to stop.
 "%PYTHON%" -c "from feishubot.cli import main; main(['events', '--no-fallback-webhook', '--log-level', 'INFO'])"
 pause

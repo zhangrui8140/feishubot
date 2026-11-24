@@ -22,10 +22,10 @@ if errorlevel 1 (
 
 powershell.exe -NoProfile -Command "$processes = Get-CimInstance Win32_Process | Where-Object { $_.Name -in @('python.exe', 'uv.exe', 'feishubot.exe') -and $_.CommandLine -and (($_.CommandLine -match 'feishubot(\.exe)?\s+events') -or (($_.CommandLine -match 'feishubot\.cli') -and ($_.CommandLine -match 'events'))) }; if ($processes) { exit 0 } else { exit 1 }"
 if errorlevel 1 (
-    echo [START] FeishuBot events
-    start "FeishuBot Events" "%PYTHON%" -c "from feishubot.cli import main; main(['events', '--no-fallback-webhook', '--log-level', 'WARNING'])"
+    echo [START] 张锐问题助手 events
+    start "张锐问题助手" "%PYTHON%" -c "from feishubot.cli import main; main(['events', '--no-fallback-webhook', '--log-level', 'WARNING'])"
 ) else (
-    echo [READY] FeishuBot events is already running
+    echo [READY] 张锐问题助手已在运行
 )
 
 powershell.exe -NoProfile -Command "$deadline = (Get-Date).AddSeconds(60); do { if (Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue) { exit 0 }; Start-Sleep -Milliseconds 250 } while ((Get-Date) -lt $deadline); exit 1"
