@@ -1,52 +1,66 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import threading
+from pathlib import Path
 from typing import Any
 
-import httpx
 import lark_oapi as lark
 
-from feishubot.ai.core.schemas import ChatMessage
-from feishubot.ai.memory import SessionManager
 from feishubot.ai.orchestrator.agent_loop import AgentLoop
+from feishubot.ai.orchestrator.chat_commands import HELP_TEXT
+from feishubot.ai.orchestrator.feishu_message import (
+    extract_image_message,
+    extract_text,
+    forward_payload,
+    message_from_payload,
+    strip_mentions,
+)
+from feishubot.ai.orchestrator.handoff import Handoff, HandoffSupervisor, ws_client_controls
 from feishubot.ai.prompts import build_system_prompt
 from feishubot.ai.providers import create_active_provider
 from feishubot.ai.tools import ToolRuntime
 from feishubot.channel import Channel, create_default_channel
-from feishubot.channel.feishu import FeishuChannel
 from feishubot.config import settings
+from feishubot.diagnosis import DiagnosisRuntime, create_store
+from feishubot.diagnosis.runner import handle_qoder_diagnosis
+from feishubot.qoder_agent import (
+    AgentUnavailableError,
+    ImageInput,
+    QoderAgentService,
+    QoderServiceConfig,
+    SessionKey,
+)
 
 logger = logging.getLogger(__name__)
+
+_MAX_IMAGES_PER_MESSAGE = 4
 
 channel_client: Channel | None = None
 _event_worker_loop: asyncio.AbstractEventLoop | None = None
 _event_worker_thread: threading.Thread | None = None
-_memory_manager: SessionManager | None = None
+_qoder_agent_service: QoderAgentService | None = None
+_diagnosis_runtime: DiagnosisRuntime | None = None
+_handoff: Handoff | None = None
 
 
 def _get_channel_client() -> Channel:
     global channel_client
     if channel_client is None:
-        logger.debug("Creating default channel client")
         channel_client = create_default_channel()
-        logger.debug(f"Channel client ready: type={type(channel_client).__name__}")
     return channel_client
 
 
-def _get_memory_manager() -> SessionManager:
-    global _memory_manager
-    if _memory_manager is None:
-        _memory_manager = SessionManager(max_history=50, store_sensitive=False)
-    return _memory_manager
+def _get_qoder_agent_service() -> QoderAgentService:
+    if _qoder_agent_service is None:
+        raise AgentUnavailableError("Qoder Agent service is not initialized")
+    return _qoder_agent_service
 
 
 def start_event_worker_loop() -> None:
     global _event_worker_loop, _event_worker_thread
     if _event_worker_loop is not None:
-        logger.debug("Event worker loop already running")
         return
 
     loop = asyncio.new_event_loop()
@@ -59,140 +73,266 @@ def start_event_worker_loop() -> None:
     thread.start()
     _event_worker_loop = loop
     _event_worker_thread = thread
+
+    future = asyncio.run_coroutine_threadsafe(_initialize_worker_runtime(), loop)
+    try:
+        future.result(timeout=60)
+    except Exception:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=10)
+        _event_worker_loop = None
+        _event_worker_thread = None
+        raise
     logger.info("Started event worker loop thread: feishu-event-worker")
 
-    _init_mcp_in_worker(loop)
+
+def stop_event_worker_loop() -> None:
+    global _event_worker_loop, _event_worker_thread, _qoder_agent_service
+    global _diagnosis_runtime, _handoff
+    loop = _event_worker_loop
+    thread = _event_worker_thread
+    if loop is None:
+        return
+
+    future = asyncio.run_coroutine_threadsafe(_shutdown_worker_runtime(), loop)
+    try:
+        future.result(timeout=settings.qoder_shutdown_grace_seconds + 10)
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to stop event worker runtime cleanly")
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        if thread is not None:
+            thread.join(timeout=10)
+        _event_worker_loop = None
+        _event_worker_thread = None
+        _qoder_agent_service = None
+        _diagnosis_runtime = None
+        _handoff = None
+        logger.info("Stopped event worker loop thread")
 
 
-def _init_mcp_in_worker(loop: asyncio.AbstractEventLoop) -> None:
-    from feishubot.ai.mcp import init_mcp_tools
+def start_handoff(ws_client: Any) -> threading.Event:
+    """Run the version-handoff supervisor; the returned event is set once this process yields."""
+    handed_over = threading.Event()
+    if _handoff is None or _event_worker_loop is None:
+        return handed_over
+    connected, disconnect, stop = ws_client_controls(ws_client)
 
-    future = asyncio.run_coroutine_threadsafe(init_mcp_tools(), loop)
+    def _stop() -> None:
+        handed_over.set()
+        stop()
 
-    def _log_mcp_init_result(completed_future: Any) -> None:
-        try:
-            client = completed_future.result()
-            if client.connected:
-                logger.info("MCP client initialized successfully in event worker")
-            else:
-                logger.info("MCP client not connected (no servers configured)")
-        except Exception:  # noqa: BLE001
-            logger.exception("Failed to initialize MCP client in event worker")
+    supervisor = HandoffSupervisor(
+        _handoff,
+        connected=connected,
+        process=_process_forwarded,
+        disconnect=disconnect,
+        stop=_stop,
+        drain_timeout=settings.qoder_run_timeout_seconds
+        + settings.qoder_shutdown_grace_seconds
+        + 60,
+    )
+    asyncio.run_coroutine_threadsafe(supervisor.run(), _event_worker_loop)
+    return handed_over
 
-    future.add_done_callback(_log_mcp_init_result)
+
+async def _initialize_worker_runtime() -> None:
+    global _qoder_agent_service, _diagnosis_runtime, _handoff
+    backend = settings.feishu_agent_backend.strip().lower()
+    if backend == "qoder_sdk":
+        mcp_config_value = settings.mcp_servers_config_path.strip()
+        mcp_config_path = (
+            Path(mcp_config_value).expanduser().resolve() if mcp_config_value else None
+        )
+        domain_value = settings.qoder_domain_knowledge_dir.strip()
+        domain_dir = Path(domain_value).expanduser().resolve() if domain_value else None
+        config = QoderServiceConfig(
+            workspace_root=Path(settings.qoder_workspace_root).expanduser().resolve(),
+            model=settings.qoder_model,
+            session_store_dir=Path(settings.qoder_session_store_dir).expanduser().resolve(),
+            personal_access_token=settings.qoder_personal_access_token.get_secret_value(),
+            mcp_servers_config_path=mcp_config_path,
+            run_timeout_seconds=settings.qoder_run_timeout_seconds,
+            cancel_grace_seconds=settings.qoder_cancel_grace_seconds,
+            shutdown_grace_seconds=settings.qoder_shutdown_grace_seconds,
+            max_concurrent_runs=settings.qoder_max_concurrent_runs,
+            max_live_sessions=settings.qoder_max_live_sessions,
+            max_queued_per_session=settings.qoder_max_queued_per_session,
+            session_idle_ttl_seconds=settings.qoder_session_idle_ttl_seconds,
+            dedup_ttl_seconds=settings.qoder_dedup_ttl_seconds,
+            domain_knowledge_dir=domain_dir,
+            max_buffer_size_bytes=settings.qoder_max_buffer_size_bytes,
+            mode=settings.qoder_agent_mode.strip().lower(),
+        )
+        _qoder_agent_service = QoderAgentService(config)
+        await _qoder_agent_service.start()
+        if settings.qoder_diagnosis_cards_enabled:
+            _diagnosis_runtime = DiagnosisRuntime(
+                _get_channel_client(),
+                create_store(settings.qoder_diagnosis_store_dir),
+            )
+        handoff_value = settings.qoder_handoff_dir.strip()
+        if handoff_value:
+            _handoff = Handoff(Path(handoff_value).expanduser().resolve())
+        return
+
+    if backend == "legacy":
+        from feishubot.ai.mcp import init_mcp_tools
+
+        await init_mcp_tools()
+        return
+
+    raise ValueError(f"Unsupported FEISHU_AGENT_BACKEND: {settings.feishu_agent_backend}")
+
+
+async def _shutdown_worker_runtime() -> None:
+    if _qoder_agent_service is not None:
+        await _qoder_agent_service.close()
+        return
+
+    if settings.feishu_agent_backend.strip().lower() == "legacy":
+        from feishubot.ai.mcp import get_mcp_client
+
+        await get_mcp_client().disconnect()
 
 
 def _submit_event_task(coro: Any) -> None:
     if _event_worker_loop is None:
-        logger.debug("Event worker loop not started yet, starting now")
         start_event_worker_loop()
-
     if _event_worker_loop is None:
         raise RuntimeError("event worker loop failed to start")
 
     future = asyncio.run_coroutine_threadsafe(coro, _event_worker_loop)
-    logger.debug("Submitted message event task to worker loop")
 
     def _log_task_result(completed_future: Any) -> None:
         try:
             completed_future.result()
         except Exception:  # noqa: BLE001
-            logger.exception("failed to handle feishu message event")
+            logger.exception("Failed to handle Feishu message event")
 
     future.add_done_callback(_log_task_result)
 
 
-def _extract_text(raw_content: Any) -> str | None:
-    if not isinstance(raw_content, str):
-        return None
-
-    text = raw_content.strip()
-    if not text:
-        return None
-
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError:
-        return text
-
-    if isinstance(payload, dict):
-        parsed_text = payload.get("text")
-        if isinstance(parsed_text, str) and parsed_text.strip():
-            return parsed_text.strip()
-
-    return text
+async def _download_images(message_id: str, image_keys: list[str]) -> tuple[ImageInput, ...]:
+    images: list[ImageInput] = []
+    for image_key in image_keys[:_MAX_IMAGES_PER_MESSAGE]:
+        data_url = await _get_channel_client().get_message_image_data_url(
+            message_id=message_id,
+            file_key=image_key,
+        )
+        header, _, data = data_url.partition(";base64,")
+        images.append(ImageInput(media_type=header.removeprefix("data:"), data_base64=data))
+    return tuple(images)
 
 
-def _extract_file_key(raw_content: Any) -> str | None:
-    if not isinstance(raw_content, str):
-        return None
-
-    try:
-        payload = json.loads(raw_content)
-    except json.JSONDecodeError:
-        return None
-
-    if not isinstance(payload, dict):
-        return None
-
-    file_key = payload.get("file_key") or payload.get("image_key")
-    return file_key if isinstance(file_key, str) and file_key.strip() else None
-
-
-async def _run_agent(message: str, user_id: str | None) -> str:
+async def _run_legacy_agent(message: str, user_id: str | None) -> str:
     active = settings.active_llm_config()
-    model_provider = create_active_provider()
     agent_loop = AgentLoop(
-        model_provider=model_provider,
+        model_provider=create_active_provider(),
         tool_runtime=ToolRuntime(),
         system_prompt=build_system_prompt(active.system_prompt, include_core=False),
     )
     return await agent_loop.run(user_input=message, user_id=user_id)
 
 
-async def _run_agent_with_image(
-    image_data_url: str, user_message: str | None = None, user_id: str | None = None
-) -> str:
-    """Run image analysis with a multimodal message and safe fallback."""
-    active = settings.active_llm_config()
-    model_provider = create_active_provider()
-    system_prompt = build_system_prompt(active.system_prompt, include_core=False)
-    text_prompt = user_message or "请分析这张图片的主要内容，并给出简洁结论。"
-
-    # Use multimodal image_url content; data URL can be image/png/jpeg/webp.
-    multimodal_messages = [
-        ChatMessage(role="system", content=system_prompt),
-        ChatMessage(
-            role="user",
-            content=[
-                {"type": "image_url", "image_url": {"url": image_data_url}},
-                {"type": "text", "text": text_prompt},
-            ],
-        ),
-    ]
-    logger.debug(
-        "Prepared multimodal request with image_url data URI prefix: "
-        f"{image_data_url[:32]}..., total_chars={len(image_data_url)}"
+async def _send_chat_message(chat_id: str, text: str) -> None:
+    await _get_channel_client().send_text_message(
+        receive_id=chat_id,
+        text=text,
+        receive_id_type="chat_id",
     )
 
+
+async def _respond(message: Any, text: str) -> None:
+    """Reply to the triggering message so concurrent tasks/askers can tell answers apart."""
+    quote_reply = (
+        getattr(message, "chat_type", None) == "group"
+        or settings.qoder_agent_mode.strip().lower() == "dev"
+    )
+    if quote_reply:
+        try:
+            await _get_channel_client().reply_text_message(
+                message_id=str(message.message_id),
+                text=text,
+            )
+            return
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "Failed to reply to Feishu message, request=%s; sending to chat instead",
+                str(message.message_id)[-8:],
+                exc_info=True,
+            )
+    await _send_chat_message(str(message.chat_id), text)
+
+
+def _build_session_key(message: Any, user_open_id: str | None) -> SessionKey:
+    return SessionKey.build(
+        chat_id=str(message.chat_id),
+        user_open_id=user_open_id or "",
+        message_id=str(message.message_id),
+        thread_id=getattr(message, "thread_id", None),
+    )
+
+
+async def _process_forwarded(payload: dict[str, Any]) -> None:
+    await _process_qoder_text(
+        message_from_payload(payload),
+        payload.get("text") or "",
+        payload.get("user_open_id"),
+        payload.get("image_keys") or None,
+    )
+
+
+async def _process_qoder_text(
+    message: Any,
+    text: str,
+    user_open_id: str | None,
+    image_keys: list[str] | None = None,
+) -> None:
+    handoff = _handoff
+    if handoff is None:
+        await _handle_qoder_text(message, text, user_open_id, image_keys)
+        return
+    session_key = _build_session_key(message, user_open_id).value
+    target = handoff.forward_target(session_key)
+    if target is not None:
+        handoff.forward(target, forward_payload(message, text, user_open_id, image_keys))
+        logger.warning(
+            "Forwarded message to pid=%s during handoff, request=%s",
+            target,
+            str(message.message_id)[-8:],
+        )
+        return
+    handoff.begin(session_key)
     try:
-        response = await model_provider.chat(messages=multimodal_messages, user_id=user_id)
-        if response.text.strip():
-            return response.text
-        return "图片已收到，但模型没有返回可读结果，请稍后重试。"
-    except httpx.TimeoutException:
-        logger.exception("Image analysis timed out when calling model provider")
-        return "图片已收到，但模型分析超时。请稍后重试，或切换更快/支持视觉的模型。"
-    except Exception:  # noqa: BLE001
-        logger.exception("Image analysis request failed in multimodal mode")
-        return "图片已收到，但当前模型暂时无法完成图片分析。请检查所选模型是否支持视觉输入后重试。"
+        await _handle_qoder_text(message, text, user_open_id, image_keys)
+    finally:
+        handoff.end(session_key)
+
+
+async def _handle_qoder_text(
+    message: Any,
+    text: str,
+    user_open_id: str | None,
+    image_keys: list[str] | None = None,
+) -> None:
+    await handle_qoder_diagnosis(
+        message=message,
+        text=text,
+        user_open_id=user_open_id,
+        image_keys=image_keys,
+        session_key=_build_session_key(message, user_open_id),
+        service=_get_qoder_agent_service(),
+        runtime=_diagnosis_runtime,
+        download_images=_download_images,
+        respond=_respond,
+    )
 
 
 async def process_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
-    logger.debug("Begin processing p2_im_message_receive_v1 event")
     event = data.event
     if event is None or event.message is None:
-        logger.warning("Skip event: missing event/message payload")
+        logger.warning("Skipped Feishu event with no message payload")
         return
 
     message = event.message
@@ -202,139 +342,66 @@ async def process_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1
     if event.sender is not None and event.sender.sender_id is not None:
         user_open_id = event.sender.sender_id.open_id
 
-    logger.debug(
-        "Incoming message: "
-        f"message_id={message_id}, chat_id={chat_id}, "
-        f"message_type={message.message_type}, sender_open_id={user_open_id}"
+    logger.info(
+        "Received Feishu message, request=%s, type=%s",
+        str(message_id)[-8:],
+        message.message_type,
     )
 
+    if not message_id or not chat_id:
+        logger.warning("Skipped Feishu event missing message_id or chat_id")
+        return
+
+    is_qoder = settings.feishu_agent_backend.strip().lower() == "qoder_sdk"
+
     if message.message_type == "text":
-        text = _extract_text(message.content)
+        raw_text = extract_text(message.content)
+        text = strip_mentions(raw_text) if raw_text else ""
         if not text:
-            logger.warning(
-                f"Skip text message with empty content: message_id={message_id}, chat_id={chat_id}"
-            )
+            if is_qoder and raw_text:
+                await _respond(message, HELP_TEXT)
+                return
+            logger.warning("Skipped empty Feishu text message, request=%s", str(message_id)[-8:])
             return
 
-        logger.debug(f"Running text agent for message_id={message_id}")
-        reply = await _run_agent(text, user_open_id)
-        if chat_id:
-            logger.debug(f"Sending text reply to chat_id={chat_id} for message_id={message_id}")
-            await _get_channel_client().send_text_message(
-                receive_id=chat_id,
-                text=reply,
-                receive_id_type="chat_id",
-            )
-            logger.debug(f"Text reply sent for message_id={message_id}")
-        else:
-            logger.warning(f"Skip text reply due to missing chat_id: message_id={message_id}")
-    elif message.message_type == "image":
-        logger.info(f"Received image message: message_id={message_id}, chat_id={chat_id}")
-        logger.debug(f"Image message content: {message.content}")
-        file_key = _extract_file_key(message.content)
-        if file_key:
-            logger.debug(f"Extracted file key for image message: {file_key}")
-        else:
-            logger.warning(
-                f"Failed to extract file key from image message content: message_id={message_id}"
-            )
+        if is_qoder:
+            await _process_qoder_text(message, text, user_open_id)
+            return
 
-        if file_key and chat_id and message_id:
-            try:
-                logger.debug(
-                    f"Downloading image resource with message_id={message_id}, file_key={file_key}"
-                )
-                channel_client = _get_channel_client()
-                if not isinstance(channel_client, FeishuChannel):
-                    raise RuntimeError("image analysis only supports FeishuChannel")
+        reply = await _run_legacy_agent(text, user_open_id)
+        await _send_chat_message(str(chat_id), reply)
+        return
 
-                local_image_path = await channel_client.save_message_image_to_local(
-                    message_id=message_id,
-                    file_key=file_key,
-                )
-                logger.info(f"Image saved to local file: {local_image_path}")
+    if is_qoder and message.message_type in {"image", "post"}:
+        text, image_keys = extract_image_message(message.message_type, message.content)
+        text = strip_mentions(text)
+        if not text and not image_keys:
+            logger.warning("Skipped empty Feishu message, request=%s", str(message_id)[-8:])
+            return
+        await _process_qoder_text(message, text, user_open_id, image_keys)
+        return
 
-                image_data_url = await channel_client.get_message_image_data_url(
-                    message_id=message_id,
-                    file_key=file_key,
-                )
-                logger.debug(f"Successfully downloaded image, size: {len(image_data_url)} chars")
-
-                # Send image to AI for analysis
-                logger.info("Sending image to AI for analysis")
-                reply = await _run_agent_with_image(
-                    image_data_url=image_data_url,
-                    user_message=None,
-                    user_id=user_open_id,
-                )
-                logger.debug(f"Received analysis result length={len(reply)}")
-
-                # Send analysis result back
-                logger.debug(
-                    f"Sending image analysis reply to chat_id={chat_id} for message_id={message_id}"
-                )
-                await channel_client.send_text_message(
-                    receive_id=chat_id,
-                    text=reply,
-                    receive_id_type="chat_id",
-                )
-                logger.info(f"Image analysis reply sent for message_id={message_id}")
-
-                if user_open_id:
-                    summary = f"Image analysis result: {reply.strip()}"
-                    _get_memory_manager().save_memory_event(
-                        user_id=user_open_id,
-                        role="assistant",
-                        content=summary,
-                        kind="image_analysis",
-                        metadata={
-                            "message_id": message_id,
-                            "chat_id": chat_id,
-                            "file_key": file_key,
-                            "source": "feishu_image",
-                            "local_image_path": local_image_path,
-                        },
-                    )
-            except Exception as e:
-                logger.exception(f"Failed to process image message: {e}")
-                # Send error message
-                try:
-                    user_error_message = "图片处理失败，请稍后重试。"
-                    if message_id:
-                        user_error_message = f"{user_error_message} 消息ID: {message_id}"
-                    await _get_channel_client().send_text_message(
-                        receive_id=chat_id,
-                        text=user_error_message,
-                        receive_id_type="chat_id",
-                    )
-                    logger.debug(
-                        f"Sent image-processing error reply to chat_id={chat_id}, "
-                        f"message_id={message_id}"
-                    )
-                except Exception:  # noqa: BLE001
-                    logger.exception("Failed to send image-processing error reply back to Feishu")
-        else:
-            logger.warning(
-                "Missing message_id/file_key/chat_id for image processing. "
-                f"message_id={message_id}, file_key={file_key}, chat_id={chat_id}"
-            )
-    else:
-        logger.debug(
-            f"Ignoring unsupported message type '{message.message_type}' "
-            f"for message_id={message_id}"
+    if message.message_type == "image":
+        await _send_chat_message(
+            str(chat_id),
+            "当前版本仅支持文本形式的本地代码分析，请用文字描述问题或粘贴报错。",
         )
+        return
+
+    logger.info(
+        "Ignored unsupported Feishu message type, request=%s, type=%s",
+        str(message_id)[-8:],
+        message.message_type,
+    )
 
 
 def on_p2_im_chat_access_event_bot_p2p_chat_entered_v1(
     data: lark.im.v1.P2ImChatAccessEventBotP2pChatEnteredV1,
 ) -> None:
-    # Explicitly handle this event type to avoid noisy "processor not found" errors.
     logger.debug("Received bot_p2p_chat_entered_v1 event")
 
 
 def on_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
-    # Event callbacks must return quickly; process message in the dedicated worker loop.
-    logger.debug("Received callback for p2_im_message_receive_v1, scheduling async task")
     _submit_event_task(process_p2_im_message_receive_v1(data))
 
 
