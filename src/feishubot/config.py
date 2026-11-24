@@ -88,6 +88,8 @@ class Settings(BaseSettings):
     qoder_handoff_dir: str = str(Path.home() / ".feishubot" / "handoff")
     qoder_diagnosis_cards_enabled: bool = True
     qoder_diagnosis_store_dir: str = str(Path.home() / ".feishubot" / "diagnoses")
+    # Comma-separated open_ids allowed to trigger dev-mode tasks; empty denies everyone.
+    qoder_dev_allowed_open_ids: str = ""
 
     def _load_models_from_toml(self, config_path: Path) -> tuple[str, dict[str, dict[str, Any]]]:
         if not config_path.exists():

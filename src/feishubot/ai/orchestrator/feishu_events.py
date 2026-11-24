@@ -166,11 +166,13 @@ async def _initialize_worker_runtime() -> None:
         )
         _qoder_agent_service = QoderAgentService(config)
         await _qoder_agent_service.start()
-        if settings.qoder_diagnosis_cards_enabled:
-            _diagnosis_runtime = DiagnosisRuntime(
-                _get_channel_client(),
-                create_store(settings.qoder_diagnosis_store_dir),
-            )
+        # The runtime keeps task contexts even when card UI is disabled, so
+        # quote-reply continuation and supplement merging never depend on cards.
+        _diagnosis_runtime = DiagnosisRuntime(
+            _get_channel_client(),
+            create_store(settings.qoder_diagnosis_store_dir),
+            cards_enabled=settings.qoder_diagnosis_cards_enabled,
+        )
         handoff_value = settings.qoder_handoff_dir.strip()
         if handoff_value:
             _handoff = Handoff(Path(handoff_value).expanduser().resolve())
@@ -235,15 +237,24 @@ async def _run_legacy_agent(message: str, user_id: str | None) -> str:
     return await agent_loop.run(user_input=message, user_id=user_id)
 
 
-async def _send_chat_message(chat_id: str, text: str) -> None:
-    await _get_channel_client().send_text_message(
+async def _send_chat_message(chat_id: str, text: str) -> dict[str, Any]:
+    return await _get_channel_client().send_text_message(
         receive_id=chat_id,
         text=text,
         receive_id_type="chat_id",
     )
 
 
-async def _respond(message: Any, text: str) -> None:
+def _response_message_id(response: dict[str, Any]) -> str | None:
+    data = response.get("data")
+    if isinstance(data, dict):
+        message_id = data.get("message_id")
+        if isinstance(message_id, str) and message_id:
+            return message_id
+    return None
+
+
+async def _respond(message: Any, text: str) -> str | None:
     """Reply to the triggering message so concurrent tasks/askers can tell answers apart."""
     quote_reply = (
         getattr(message, "chat_type", None) == "group"
@@ -251,18 +262,19 @@ async def _respond(message: Any, text: str) -> None:
     )
     if quote_reply:
         try:
-            await _get_channel_client().reply_text_message(
+            response = await _get_channel_client().reply_text_message(
                 message_id=str(message.message_id),
                 text=text,
             )
-            return
+            return _response_message_id(response)
         except Exception:  # noqa: BLE001
             logger.warning(
                 "Failed to reply to Feishu message, request=%s; sending to chat instead",
                 str(message.message_id)[-8:],
                 exc_info=True,
             )
-    await _send_chat_message(str(message.chat_id), text)
+    response = await _send_chat_message(str(message.chat_id), text)
+    return _response_message_id(response)
 
 
 def _build_session_key(message: Any, user_open_id: str | None) -> SessionKey:
@@ -310,12 +322,30 @@ async def _process_qoder_text(
         handoff.end(session_key)
 
 
+def _dev_sender_allowed(user_open_id: str | None) -> bool:
+    allowed = {
+        item.strip()
+        for item in settings.qoder_dev_allowed_open_ids.split(",")
+        if item.strip()
+    }
+    return bool(user_open_id) and user_open_id in allowed
+
+
 async def _handle_qoder_text(
     message: Any,
     text: str,
     user_open_id: str | None,
     image_keys: list[str] | None = None,
 ) -> None:
+    if settings.qoder_agent_mode.strip().lower() == "dev" and not _dev_sender_allowed(
+        user_open_id
+    ):
+        logger.warning(
+            "Rejected dev task from unauthorized sender, request=%s",
+            str(message.message_id)[-8:],
+        )
+        await _respond(message, "该机器人仅对授权用户开放。")
+        return
     await handle_qoder_diagnosis(
         message=message,
         text=text,
