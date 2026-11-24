@@ -10,26 +10,26 @@ RESET_COMMANDS = {"/new", "/reset", "新会话", "新对话", "重置", "重置�
 HELP_TEXT = "\n".join(
     [
         "可用指令：",
-        "· 分析进行中发送「补充 …」：并入当前分析（如「补充 erp-mall-prod」）；发送新问题则排队、单独成卡回答",
+        "· 分析进行中发送「补充：…」：并入当前分析（如「补充：erp-mall-prod」）；发送新问题则排队、单独成卡回答",
         "· 终止 / 停止 / 取消：停止当前分析",
         "· 状态：查看当前是否有分析在进行",
         "· 新会话 / 重置：清空上下文，下一个问题重新开始",
         "· 帮助：查看本说明",
     ]
 )
-COMMAND_HINT = "分析中发送「补充 …」可并入当前分析，新问题将排队单独回答；「终止」停止，「帮助」查看全部指令。"
+COMMAND_HINT = "分析中发送「补充：…」可并入当前分析，新问题将排队单独回答；「终止」停止，「帮助」查看全部指令。"
 DEV_HELP_TEXT = "\n".join(
     [
         "可用指令（开发任务模式 · 支持多任务并行）：",
         "· 直接发送任务：如「erp-purchase-dev-大仓端堆活动 修复xxx校验问题」；每条新任务独立并行执行（最多 4 个），完成后提交并推送 feature 分支（禁推 prod/master/main）",
-        "· 引用回复某条任务消息：对该任务补充或追问；任务进行中发送「补充 …」并入最近一个任务",
+        "· 引用回复某条任务消息：对该任务补充或追问；任务进行中发送「补充：…」并入最近一个任务",
         "· 终止 / 停止 / 取消：停止最近一个任务；引用回复某条任务再发「终止」可单独停止它",
         "· 状态：查看当前并行任务列表",
         "· 模型：查看当前模型；「模型 <名称>」切换（如「模型 GLM-5.3」），下一个任务生效",
         "· 帮助：查看本说明",
     ]
 )
-DEV_COMMAND_HINT = "多任务并行：新任务独立执行；「补充 …」并入最近任务，引用回复可定向某任务；「终止」停止最近任务，「状态」查看列表。"
+DEV_COMMAND_HINT = "多任务并行：新任务独立执行；「补充：…」并入最近任务，引用回复可定向某任务；「终止」停止最近任务，「状态」查看列表。"
 
 
 def dev_status_text(service: QoderAgentService, scope_prefix: str) -> str:
@@ -122,7 +122,7 @@ async def handle_command(service: QoderAgentService, session_key: str, command: 
         if not status.running:
             return "当前没有正在进行的分析。"
         queued = f"，另有 {status.queued} 个问题排队" if status.queued else ""
-        return f"当前有分析正在进行{queued}。发送「补充 …」可并入当前分析，新问题将排队单独回答；「终止」停止。"
+        return f"当前有分析正在进行{queued}。发送「补充：…」可并入当前分析，新问题将排队单独回答；「终止」停止。"
     if command in RESET_COMMANDS:
         if await service.reset(session_key):
             return "已开启新会话，之前的对话上下文已清空。"

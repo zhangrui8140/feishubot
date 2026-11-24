@@ -39,6 +39,34 @@ _IMAGE_ONLY_PROMPT = (
     "并结合本地代码、ERP 数据或日志分析问题。"
 )
 
+# User-facing wording per mode; the task flow itself is shared.
+_MODE_TEXTS = {
+    "readonly": {
+        "busy": "当前会话已有较多分析任务，请稍后再试。",
+        "timeout": "本次代码分析已超时并停止，请缩小问题范围后重试。",
+        "cancelled": "当前代码分析已取消。",
+        "permission": "请求包含只读范围之外的操作，已拒绝执行。",
+        "unavailable": "Qoder 代码分析暂时不可用，请稍后重试。请求ID：{request}",
+        "failed": "代码分析失败，请稍后重试。请求ID：{request}",
+        "interrupt_notice": "已收到补充信息，正在中断当前分析……",
+        "interrupt_progress": "已结合补充信息重新排查，请稍候……",
+        "queued_progress": "已收到新问题，将在当前分析完成后单独开始排查……",
+        "followup_progress": "已关联上一轮排查结论，正在结合新信息深入排查……",
+    },
+    "dev": {
+        "busy": "并行任务已达上限，请稍后再试。",
+        "timeout": "本次任务已超时并停止，请缩小范围后重试。",
+        "cancelled": "当前任务已取消。",
+        "permission": "请求包含允许范围之外的操作，已拒绝执行。",
+        "unavailable": "Qoder 开发任务暂时不可用，请稍后重试。请求ID：{request}",
+        "failed": "开发任务失败，请稍后重试。请求ID：{request}",
+        "interrupt_notice": "已收到补充信息，正在中断当前任务……",
+        "interrupt_progress": "已结合补充信息重新执行，请稍候……",
+        "queued_progress": "已收到新问题，将在当前任务完成后单独开始……",
+        "followup_progress": "已关联上一轮任务结论，正在结合新信息继续……",
+    },
+}
+
 
 async def handle_qoder_diagnosis(
     *,
@@ -50,32 +78,33 @@ async def handle_qoder_diagnosis(
     service: QoderAgentService,
     runtime: DiagnosisRuntime | None,
     download_images: Callable[[str, list[str]], Awaitable[tuple[ImageInput, ...]]],
-    respond: Callable[[Any, str], Awaitable[None]],
+    respond: Callable[[Any, str], Awaitable[str | None]],
 ) -> None:
     message_id = str(message.message_id)
-    if getattr(service, "mode", "readonly") == "dev":
-        await _handle_dev_task(
-            message=message,
-            text=text,
-            user_open_id=user_open_id,
-            image_keys=image_keys,
-            session_key=session_key,
-            service=service,
-            runtime=runtime,
-            download_images=download_images,
-            respond=respond,
-        )
-        return
-    active = runtime.active(session_key.value) if runtime else None
+    mode = getattr(service, "mode", "readonly")
+    is_dev = mode == "dev"
+    texts = _MODE_TEXTS["dev" if is_dev else "readonly"]
+    base_key = session_key
+    reply_ctx = (
+        runtime.context_from_reply(message, user_open_id) if runtime is not None else None
+    )
+
     if not image_keys:
         command = text.strip().lower()
-        if active is not None and command in CANCEL_COMMANDS:
-            await active.supplement("正在终止当前分析")
-        reply = await handle_command(service, session_key.value, command)
-        if reply is not None:
-            if active is None or reply != "正在终止当前分析。":
+        if is_dev:
+            reply = await _handle_dev_command(service, runtime, base_key, reply_ctx, command)
+            if reply is not None:
                 await respond(message, reply)
-            return
+                return
+        else:
+            active = runtime.active(session_key.value) if runtime else None
+            if active is not None and command in CANCEL_COMMANDS:
+                await active.supplement("正在终止当前分析")
+            reply = await handle_command(service, session_key.value, command)
+            if reply is not None:
+                if active is None or reply != "正在终止当前分析。":
+                    await respond(message, reply)
+                return
 
     if not image_keys and runtime is not None:
         outcome = record_text_feedback(
@@ -92,10 +121,19 @@ async def handle_qoder_diagnosis(
         await respond(message, "图片下载失败或超过大小限制，请压缩后重发，或用文字描述问题。")
         return
 
+    # Dev multi-task: every new task gets its own session so tasks run in parallel.
+    # Quote-reply or an explicit supplement targets an existing task instead.
+    task_key = (
+        _resolve_dev_task_key(service, base_key, message_id, text, image_keys, reply_ctx)
+        if is_dev
+        else base_key
+    )
+    active = runtime.active(task_key.value) if runtime is not None else None
+
     reuse = None
     if active is not None and _is_explicit_supplement(text):
-        # Scenario 1: In-Flight Analysis + explicit supplement - interrupt old run and resubmit merged
-        logger.info("Diagnosis card is active for session %s, interrupting for supplement", session_key.value)
+        # In-flight task + explicit supplement: interrupt the old run and resubmit merged.
+        logger.info("Task %s active, interrupting for supplement", task_key.value)
         old_question = active.context.question
         stage_text = (
             active.context.stage_text
@@ -103,11 +141,11 @@ async def handle_qoder_diagnosis(
             else ""
         )
         active.mark_interrupted_for_supplement()
-        await active.supplement("已收到补充信息，正在中断当前分析……")
+        await active.supplement(texts["interrupt_notice"])
 
-        await service.cancel(session_key.value)
+        await service.cancel(task_key.value)
         for _ in range(50):
-            if not service.status(session_key.value).running:
+            if not service.status(task_key.value).running:
                 break
             await asyncio.sleep(0.1)
 
@@ -118,26 +156,26 @@ async def handle_qoder_diagnosis(
         )
         reuse = active.context
         active.reset_for_continuation(effective_prompt)
-        progress_text = "已结合补充信息重新排查，请稍候……"
+        progress_text = texts["interrupt_progress"]
     elif active is not None:
-        # A brand-new, unrelated question arrived while an analysis is in flight.
-        # Keep the running card untouched and queue this as its own diagnosis card
-        # (the service serialises same-session runs, so it starts after the current one).
+        # A brand-new, unrelated question arrived while a task is in flight.
+        # Keep the running task untouched and queue this as its own diagnosis
+        # (the service serialises same-session runs, so it starts afterwards).
         logger.info(
-            "New question during in-flight analysis for session %s; queueing as separate diagnosis",
-            session_key.value,
+            "New question during in-flight task for session %s; queueing separately",
+            task_key.value,
         )
         effective_prompt = text or _IMAGE_ONLY_PROMPT
         reuse = None
-        progress_text = "已收到新问题，将在当前分析完成后单独开始排查……"
-    elif not images and service.status(session_key.value).running:
-        # Fallback for plain chat / sessions without active diagnosis card controller
+        progress_text = texts["queued_progress"]
+    elif not is_dev and not images and service.status(task_key.value).running:
+        # Readonly fallback for plain chat / sessions without an active controller.
         await respond(message, "已收到补充，将在当前分析中参考。")
         try:
             if await service.supplement(
                 AgentRequest(
                     message_id=message_id,
-                    session_key=session_key,
+                    session_key=task_key,
                     prompt=text or _IMAGE_ONLY_PROMPT,
                     images=images,
                 ),
@@ -150,19 +188,17 @@ async def handle_qoder_diagnosis(
         effective_prompt = text or _IMAGE_ONLY_PROMPT
         progress_text = "上一轮分析已结束，将结合补充内容继续分析，请稍候……"
     else:
-        # Scenario 2: Completed Analysis - Followup / Quote Reply
-        reply_context = None
-        if runtime is not None:
-            reply_context = runtime.context_from_reply(message, user_open_id)
-            if reply_context is None:
-                latest = runtime.latest_context(session_key.value)
-                if latest is not None and _is_followup_intent(text):
-                    reply_context = latest
+        # Completed task followup / quote reply, or a brand-new task.
+        reply_context = reply_ctx
+        if not is_dev and reply_context is None and runtime is not None:
+            latest = runtime.latest_context(task_key.value)
+            if latest is not None and _is_followup_intent(text):
+                reply_context = latest
 
         if reply_context is not None:
             logger.info(
-                "Session %s continuing diagnosis from reply_context %s",
-                session_key.value,
+                "Session %s continuing from reply_context %s",
+                task_key.value,
                 reply_context.diagnosis_id,
             )
             effective_prompt = _build_followup_prompt(
@@ -170,9 +206,9 @@ async def handle_qoder_diagnosis(
                 previous_result=reply_context.result_text or reply_context.stage_text or "",
                 new_input=text,
             )
-            user_id = user_open_id or session_key.user_open_id
+            user_id = user_open_id or task_key.user_open_id
             reuse = reply_context if reply_context.owner_open_id == user_id else None
-            progress_text = "已关联上一轮排查结论，正在结合新信息深入排查……"
+            progress_text = texts["followup_progress"]
         else:
             effective_prompt = text or _IMAGE_ONLY_PROMPT
             reuse = None
@@ -180,12 +216,12 @@ async def handle_qoder_diagnosis(
                 text,
                 service.projects,
                 observability_enabled=service.observability_enabled,
-                mode=getattr(service, "mode", "readonly"),
+                mode=mode,
             )
 
     request = AgentRequest(
         message_id=message_id,
-        session_key=session_key,
+        session_key=task_key,
         prompt=effective_prompt,
         images=images,
     )
@@ -195,7 +231,7 @@ async def handle_qoder_diagnosis(
         message,
         effective_prompt,
         user_open_id,
-        session_key,
+        task_key,
         service.projects,
         respond,
         reuse,
@@ -226,38 +262,32 @@ async def handle_qoder_diagnosis(
             logger.info("Ignored duplicate Feishu message, request=%s", message_id[-8:])
             return
         except AgentBusyError:
-            await finish(DiagnosisStatus.FAILED, "当前会话已有较多分析任务，请稍后再试。")
+            await finish(DiagnosisStatus.FAILED, texts["busy"])
             return
         except AgentTimeoutError:
-            await finish(
-                DiagnosisStatus.TIMED_OUT,
-                "本次代码分析已超时并停止，请缩小问题范围后重试。",
-            )
+            await finish(DiagnosisStatus.TIMED_OUT, texts["timeout"])
             return
         except AgentCancelledError:
             if controller is not None and controller.is_interrupted_for_supplement:
-                logger.info("Run was interrupted for supplement; keeping card for resubmission")
+                logger.info("Run interrupted for supplement; keeping context for resubmission")
                 return
-            await finish(DiagnosisStatus.CANCELLED, "当前代码分析已取消。")
+            await finish(DiagnosisStatus.CANCELLED, texts["cancelled"])
             return
         except AgentPermissionError:
-            await finish(
-                DiagnosisStatus.PERMISSION_DENIED,
-                "请求包含只读范围之外的操作，已拒绝执行。",
-            )
+            await finish(DiagnosisStatus.PERMISSION_DENIED, texts["permission"])
             return
         except AgentUnavailableError:
             logger.exception("Qoder Agent request failed, request=%s", message_id[-8:])
             await finish(
                 DiagnosisStatus.FAILED,
-                f"Qoder 代码分析暂时不可用，请稍后重试。请求ID：{message_id[-8:]}",
+                texts["unavailable"].format(request=message_id[-8:]),
             )
             return
         except Exception:  # noqa: BLE001
             logger.exception("Unexpected Qoder Agent failure, request=%s", message_id[-8:])
             await finish(
                 DiagnosisStatus.FAILED,
-                f"代码分析失败，请稍后重试。请求ID：{message_id[-8:]}",
+                texts["failed"].format(request=message_id[-8:]),
             )
             return
 
@@ -278,182 +308,6 @@ async def handle_qoder_diagnosis(
                 result_text,
                 duration_ms=result.duration_ms,
                 tool_names=result.tool_names,
-            )
-        else:
-            await respond(message, result_text)
-    finally:
-        if runtime is not None and controller is not None:
-            if not controller.is_interrupted_for_supplement:
-                runtime.release(session_key.value, controller)
-
-
-async def _handle_dev_task(
-    *,
-    message: Any,
-    text: str,
-    user_open_id: str | None,
-    image_keys: list[str] | None,
-    session_key: SessionKey,
-    service: QoderAgentService,
-    runtime: DiagnosisRuntime | None,
-    download_images: Callable[[str, list[str]], Awaitable[tuple[ImageInput, ...]]],
-    respond: Callable[[Any, str], Awaitable[None]],
-) -> None:
-    # Dev multi-task: every new task gets its own session so tasks run in parallel.
-    # Quote-reply or an explicit supplement targets an existing task instead.
-    message_id = str(message.message_id)
-    base_key = session_key
-    reply_ctx = (
-        runtime.context_from_reply(message, user_open_id) if runtime is not None else None
-    )
-
-    if not image_keys:
-        command = text.strip().lower()
-        reply = await _handle_dev_command(service, runtime, base_key, reply_ctx, command)
-        if reply is not None:
-            await respond(message, reply)
-            return
-
-    if not image_keys and runtime is not None:
-        outcome = record_text_feedback(runtime.store, message, text, user_open_id, runtime)
-        if outcome is not None:
-            await respond(message, outcome.message)
-            return
-
-    try:
-        images = await _images(message_id, image_keys, download_images)
-    except Exception:  # noqa: BLE001
-        logger.exception("Failed to download Feishu image, request=%s", message_id[-8:])
-        await respond(message, "图片下载失败或超过大小限制，请压缩后重发，或用文字描述问题。")
-        return
-
-    task_key = _resolve_dev_task_key(service, base_key, message_id, text, image_keys, reply_ctx)
-    active = runtime.active(task_key.value) if runtime is not None else None
-
-    reuse = None
-    if active is not None and _is_explicit_supplement(text):
-        logger.info("Dev task %s active, interrupting for supplement", task_key.value)
-        old_question = active.context.question
-        stage_text = (
-            active.context.stage_text
-            if (active.context.stage_text and active.context.stage_text not in ("正在分析", "正在排查"))
-            else ""
-        )
-        active.mark_interrupted_for_supplement()
-        await active.supplement("已收到补充信息，正在中断当前任务……")
-        await service.cancel(task_key.value)
-        for _ in range(50):
-            if not service.status(task_key.value).running:
-                break
-            await asyncio.sleep(0.1)
-        effective_prompt = _build_in_flight_supplement_prompt(
-            old_question=old_question,
-            stage_text=stage_text,
-            new_input=text,
-        )
-        reuse = active.context
-        active.reset_for_continuation(effective_prompt)
-        progress_text = "已结合补充信息重新执行，请稍候……"
-    elif active is not None:
-        effective_prompt = text or _IMAGE_ONLY_PROMPT
-        reuse = None
-        progress_text = "已收到新问题，将在当前任务完成后单独开始……"
-    elif reply_ctx is not None:
-        logger.info("Dev task continuing from reply_context %s", reply_ctx.diagnosis_id)
-        effective_prompt = _build_followup_prompt(
-            previous_question=reply_ctx.question,
-            previous_result=reply_ctx.result_text or reply_ctx.stage_text or "",
-            new_input=text,
-        )
-        user_id = user_open_id or task_key.user_open_id
-        reuse = reply_ctx if reply_ctx.owner_open_id == user_id else None
-        progress_text = "已关联上一轮任务结论，正在结合新信息继续……"
-    else:
-        effective_prompt = text or _IMAGE_ONLY_PROMPT
-        reuse = None
-        progress_text = build_progress_text(
-            text,
-            service.projects,
-            observability_enabled=service.observability_enabled,
-            mode="dev",
-        )
-
-    request = AgentRequest(
-        message_id=message_id,
-        session_key=task_key,
-        prompt=effective_prompt,
-        images=images,
-    )
-    controller = _create_controller(
-        runtime, message, effective_prompt, user_open_id, task_key, service.projects, respond, reuse
-    )
-
-    async def accepted() -> None:
-        if controller is not None:
-            await controller.start(progress_text)
-        else:
-            await respond(message, progress_text)
-
-    async def progress(event: Any) -> None:
-        if controller is not None:
-            await controller.progress(event)
-        elif getattr(event, "kind", None) == "assistant_text" and event.text:
-            await respond(message, event.text)
-
-    async def finish(status: DiagnosisStatus, result_text: str) -> None:
-        if controller is not None:
-            await controller.finish(status, result_text)
-        else:
-            await respond(message, result_text)
-
-    try:
-        try:
-            result = await service.run(request, on_accepted=accepted, on_progress=progress)
-        except DuplicateMessageError:
-            logger.info("Ignored duplicate Feishu message, request=%s", message_id[-8:])
-            return
-        except AgentBusyError:
-            await finish(DiagnosisStatus.FAILED, "并行任务已达上限，请稍后再试。")
-            return
-        except AgentTimeoutError:
-            await finish(DiagnosisStatus.TIMED_OUT, "本次任务已超时并停止，请缩小范围后重试。")
-            return
-        except AgentCancelledError:
-            if controller is not None and controller.is_interrupted_for_supplement:
-                logger.info("Dev run interrupted for supplement; keeping card for resubmission")
-                return
-            await finish(DiagnosisStatus.CANCELLED, "当前任务已取消。")
-            return
-        except AgentPermissionError:
-            await finish(DiagnosisStatus.PERMISSION_DENIED, "请求包含允许范围之外的操作，已拒绝执行。")
-            return
-        except AgentUnavailableError:
-            logger.exception("Qoder Agent request failed, request=%s", message_id[-8:])
-            await finish(
-                DiagnosisStatus.FAILED,
-                f"Qoder 开发任务暂时不可用，请稍后重试。请求ID：{message_id[-8:]}",
-            )
-            return
-        except Exception:  # noqa: BLE001
-            logger.exception("Unexpected Qoder Agent failure, request=%s", message_id[-8:])
-            await finish(
-                DiagnosisStatus.FAILED,
-                f"开发任务失败，请稍后重试。请求ID：{message_id[-8:]}",
-            )
-            return
-
-        status = (
-            DiagnosisStatus.WAITING_SUPPLEMENT if result.needs_input else DiagnosisStatus.COMPLETED
-        )
-        result_text = result.text
-        if result.observability_unauthorized:
-            result_text += (
-                "\n\n本次未能查询日志与链路：observability 未授权或授权已过期，"
-                "结论仅基于代码与 ERP 数据；可在本地管理页对 observability 重新授权。"
-            )
-        if controller is not None:
-            await controller.finish(
-                status, result_text, duration_ms=result.duration_ms, tool_names=result.tool_names
             )
         else:
             await respond(message, result_text)
@@ -525,14 +379,14 @@ def _create_controller(
     user_open_id: str | None,
     session_key: SessionKey,
     projects: tuple[str, ...],
-    respond: Callable[[Any, str], Awaitable[None]],
+    respond: Callable[[Any, str], Awaitable[str | None]],
     reuse: Any,
 ) -> DiagnosisController | None:
     if runtime is None:
         return None
 
-    async def fallback(text: str) -> None:
-        await respond(message, text)
+    async def fallback(text: str) -> str | None:
+        return await respond(message, text)
 
     return runtime.create(
         message=message,
@@ -611,6 +465,19 @@ def _is_followup_intent(text: str) -> bool:
     return any(keyword in normalized for keyword in _FOLLOWUP_KEYWORDS)
 
 
+_SUPPLEMENT_SEPARATORS = " :：,，、"
+
+
 def _is_explicit_supplement(text: str) -> bool:
-    """Only messages that open with the supplement marker merge into an in-flight analysis."""
-    return text.strip().startswith("补充")
+    """Only「补充」alone or followed by a separator merges into an in-flight task.
+
+    「补充单元测试」opens a new task instead of supplementing the running one.
+    """
+    normalized = text.strip()
+    if normalized == "补充":
+        return True
+    return (
+        normalized.startswith("补充")
+        and len(normalized) > 2
+        and normalized[2] in _SUPPLEMENT_SEPARATORS
+    )
