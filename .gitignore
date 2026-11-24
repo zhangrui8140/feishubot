@@ -23,6 +23,9 @@ mcp_servers.toml
 # uv lockfile (not used in this project)
 uv.lock
 
+# Runtime logs
+logs/
+
 # IDE / OS
 .vscode/
 .idea/
